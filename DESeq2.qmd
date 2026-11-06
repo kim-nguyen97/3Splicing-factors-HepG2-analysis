@@ -1,0 +1,3114 @@
+---
+title: "DESeq Analysis of U2AF1, U2AF2, SF1"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+author:
+  - name: "Kim Nguyen"
+format:
+  html:
+    code-fold: TRUE
+    code-overflow: scroll
+    code-summary: "Show code"
+    code-tools: true
+    code-line-numbers: true
+    toc: true
+    toc-depth: 5
+    toc-location: right
+    toc-expand: true
+    number-sections: true
+    theme: sandstone
+    fontsize: 11pt
+    linestretch: 1.5
+    fig-format: png
+    cap-location: margin
+    body-width: 900px
+    sidebar-width: 300px
+    page-layout: full
+    crossref:
+      fig-title: Fig
+    embed-resources: true
+    link-external-newwindow: true
+    smooth-scroll: true
+    css: css.css
+    execute:
+      echo: true
+      warning: false
+---
+
+# Introduction
+## Background information
+This practical course (F2/ 3-month internship) is aimed to investigate the role of trans-acting RNA splicing factors in the regulation of alternative splicing, and how their dysfunction can contribute to cancer and tumor growth. The project begins by exploring the fundamental mechanisms of splicing, particularly the involvement of key trans-factors such as U2AF2, U2AF1, and SF1. These proteins play crucial roles in recognizing the 3′ splice site (AG), facilitating exon definition, and promoting lariat formation during intron removal, ultimately contributing to the production of mature mRNA.
+
+## Objectives / Research Questions
+Learning objectives:
+- Idenitfy key significantly regulated genes and their expression patterns.
+- Analyze relationships between DEG statistics.
+- Understand functional gene associations using Gene Ontology terms (enrichGO and g:GOST) 
+- Explore functional correlation among splice factors 
+* Hypotheses:
+- Gene expression and Splicing interaction networks are changed upon knockdown of U2AF2, U2AF1, and SF1 leading to changes in their functional enrichment.
+
+## Significance of the Study
+Alternative splicing plays a critical role in gene regulation and has been widely implicated in cancer development. This analysis is further researching how the splicing factors, particularly 3 genes of interest (U2AF1, U2AF2, and SF1), influences revealing insight into oncogenic process and potential therapeutic targets.
+
+### Data Sources
+For this study, publicly raw RNA-seq datasets (fastq files) were obtained from the ENCODE project, which are silienced or reduced the expression using short hairpin RNA (shRNA) targeting U2AF2, U2AF1, and SF1 in the HepG2 liver cancer cell line (originating from a 15-year-old white male donor). Both shRNA-treated and control samples are replicated isogenic (that are genetically identical) which help reduce variability and makes it easier to attribute observed differences. 
+
+The data analysis pipeline includes several key steps: 
+### Data Preprocessing and tools (version number)
+- quality control using FastQC and MultiQC
+- adapter trimming with Trimmomatic
+- read alignment to the reference genome using STAR aligner
+- quantification of gene expression with HTSeq-count
+- visualization of mapped reads using IGV genome browser.
+
+# Input
+* Library input
+```{r libraries, message=FALSE}
+# For Plotting & Visualization
+library(ggplot2)
+library(tidyverse)
+library(plotly)
+library(RColorBrewer)
+library(ggrepel)
+library(markdown)
+library(ggrastr)
+library(ggpointdensity)
+library(magrittr)
+library(dplyr)
+library(gridExtra)
+library(magrittr)
+library(magick)
+library(RColorBrewer)
+library(colorRamp2)
+library(ggvenn)
+library(kableExtra)
+library(shadowtext)
+library(eulerr)
+library(UpSetR)
+library(ggshadow) 
+library(ggforce)
+library(ggpp)
+library(ggsankey)
+library(networkD3)
+library(ggalluvial)
+library(ggforce)
+library(tidyr)
+library(corrplot)
+library(Polychrome)
+library(ggrastr)
+library(ggpointdensity)
+library(magrittr)
+library(ggrepel)
+library(dplyr)
+library(igraph)
+library(ggraph)
+library(Polychrome)
+
+# For analysis
+library(pheatmap)
+library(ComplexHeatmap)
+library(pcaExplorer) #interactive tool for exploring PCA
+library(DESeq2)
+library(gprofiler2)
+library(clusterProfiler)
+library(enrichplot)
+
+# annotated human genome
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(Homo.sapiens)
+
+#to combine multiple ggplot
+library(patchwork)
+library(reshape2)
+library(ggpubr)
+
+#outpath for all results of DESeq2 analysis
+mydir = "/Users/tinkienoob/Master_thesis/HepG2_DESeq_analysis"
+```
+
+* Load result from another documents
+```{r}
+load("/Users/tinkienoob/Master_thesis/HepG2_DESeq_analysis/all_results_df_DESeq2.RData")
+load("/Users/tinkienoob/Master_thesis/HepG2_DESeq_analysis/gene_anno.RData")
+
+# Create a list of dds result of each pair of KD and control
+res_list = list(U2AF1 = res_U2AF1.df, U2AF2 = res_U2AF2.df, SF1 = res_SF1.df)
+```
+
+* Load significant junction changing results
+```{r}
+outpath = "/Users/tinkienoob/Master_thesis/Functional splice factor analysis/"
+U2AF2_highest_junction = readRDS(paste0(outpath, "U2AF2_highest_junction.rds"))
+U2AF1_highest_junction = readRDS(paste0(outpath, "U2AF1_highest_junction.rds"))
+SF1_highest_junction = readRDS(paste0(outpath, "SF1_highest_junction.rds"))
+```
+
+## Splicing annotation - Core spliceosome components input
+Input annotation file collected from paper: https://www.science.org/doi/10.1126/science.adn8105 (Malgorzata E. Rogalska et al. ,Transcriptome-wide splicing network reveals specialized regulatory functions of the core spliceosome.Science386,551-560(2024).DOI:10.1126/science.adn8105) which contain gene names and geneID of core spliceosome components (from both major and minor spliceosomes) and associated factors, RNA binding proteins with known regulatory functions in AS, , and RNA-modifying enzymes and chromatin-related factors linked to splicing regulation.
+```{r include = FALSE}
+library(readxl)
+anno_xlsx = "/Users/tinkienoob/Master_thesis/HepG2_DESeq_analysis/AS genes.xlsx"
+as_anno = read_excel(anno_xlsx) %>%
+  dplyr::select(c("gene.name.VT", "Ensemble.Gene.ID", "Class...Family")) %>%
+  dplyr::rename(
+    splice_SYMBOL = gene.name.VT,
+    splice_ENSEMBL = Ensemble.Gene.ID,
+    class = Class...Family
+  ) 
+
+as_anno_genes = as_anno %>%
+  pull(splice_ENSEMBL)
+```
+
+### Correlation-based network of SFs
+Cross-regulatory networks of splicing genes involve intricate feedback loops where splicing factors (proteins that regulate splicing) influence the splicing of other splicing factors, creating a complex web of interactions. These networks are crucial for controlling gene expression and cellular processes. They differ from transcriptional regulatory networks in their hierarchical organization, with fewer master regulators and more interconnected regulatory relationships among splicing factors. This can happen through direct binding of a splicing factor to a splicing regulatory element (SRE) on another splicing factor's pre-mRNA. 
+
+For these splice factors, identify,
+a.	 Their Correlation value with the splice factor pair by referring to the supplement table 9. For example, if the splice factor in red is your favorite, then the tg column indicates the SF pair it might be linked to, and the cor column indicates their correlation based on the similarities in AS changes following their perturbation. 
+
+the columns so and tg likely stand for:
+so	= Source gene in the edge
+tg	= Target gene in the edge
+cor	= Correlation coefficient (likely Pearson or Spearman)
+absCor	= Absolute value of correlation
+fdr	= False discovery rate (adjusted p-value) for correlation
+```{r}
+correlation_anno_xlsx = "/Users/tinkienoob/Master_thesis/HepG2_DESeq_analysis/AS_regulatory network.xlsx"
+correlation_anno = read_excel(correlation_anno_xlsx)
+
+correlation_anno = correlation_anno %>%
+  dplyr::select(edges, so, tg, cor)
+
+correlation_anno = correlation_anno %>%
+  left_join(as_anno, by = c("so" = "splice_SYMBOL")) %>%
+  rename(source_class = class) %>%
+  dplyr::select(-c("splice_ENSEMBL"))
+
+correlation_anno = correlation_anno %>%
+  left_join(as_anno, by = c("tg" = "splice_SYMBOL")) %>%
+  rename(target_class = class) %>%
+  dplyr::select(-c("splice_ENSEMBL"))
+
+#view(correlation_anno)
+```
+
+# Differential Expression / Functional and Splicing Analysis using R studio
+The primary goal is to identify genes/transcripts whose expression levels significantly differ between knockdown and control conditions. The changes in regulation interpret the biological impact of interested splicing factor depletion.
+https://bioconductor.org/packages/devel/bioc/manuals/DESeq2/man/DESeq2.pdf 
+
+## Volcano plot of each KD dataset
+Volcano plot is used to evaluate differential expression of genes in statistics way, Log2FoldChange cutoff is set to larger than 1 which is actual fold change equal to 2 and threshold for padj is < 0.05 that filter only significantly differential expressed genes.
+- LFC > 1: This means the gene's expression is 2 times higher in the test condition compared to the control.
+By that, most upregulated or downregulated genes are shown on Volcano plot and enriched by GO enirchment to investigate biological processes those genes involved in. Each KDs might cause indirect or direct effects on different biological processes.
+
+Volcano plot also uses a corrected version of padj (adjusted p-value) is to handle extreme values of -log10(padj) that would otherwise distort the plot. In other words, significant adjusted p-values are usually extremely small, therefore, -log10(padj) is used to transform the padj into the larger positive values which is easier to visualize. The smaller padj values, the higher -log10(padj) value, the more significant.
+
+The question have been raising is that Differential expression of those genes is directly or indirectly affected by KD genes? Direct effects is when loss or change in function of SF might change pre-mRNA leading to formation of different isoform proteins (AUTOREGULATION) or instability of mRNA then nonsense mediated decay (NMD) via inclusion of premature termination codons. Whereas, in indirect effects, other SF genes in complex splicing network (secondary SFs) might involve that change gene expression or downstream regulation via alternative splicing (CROSS-regulation).
+
+Rogalska, M. E., Mancini, E., Bonnal, S., Gohr, A., Dunyak, B. M., Arecco, N., ... & Valcárcel, J. (2024). Transcriptome-wide splicing network reveals specialized regulatory functions of the core spliceosome. Science, 386(6721), 551-560.
+
+::: panel-tabset
+
+### U2AF1 dataset
+```{r}
+
+#-log10(120) = -2.079181
+# convert small padj into larger -log10(padj) value and padjIsCorrected ~ 50 is used to scale up the value for better visualization
+volcano_U2AF1.df = dplyr::mutate(res_U2AF1.df, 
+                      padjIsCorrected = -log10(padj) > 50, # If -log10(padj) is greater than 50, mark it as TRUE.
+                      padj_corrected = case_when(
+                        padjIsCorrected ~ 50, 
+                        TRUE ~ -log10(padj)
+                      ))
+
+# Volcano plot of U2AF1
+ggplot(volcano_U2AF1.df, aes(x= log2FoldChange, y= padj_corrected, shape= padjIsCorrected, color= up_down, label= SYMBOL)) +
+  geom_point() +
+  geom_point(data = subset(volcano_U2AF1.df, !is.na(myLabel)),
+             fill = "#FFCC65FF", color = "black", size = 3, shape = 21, stroke = 1) + 
+  geom_label_repel(data = subset(volcano_U2AF1.df, !is.na(myLabel)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#FFCC65FF",
+                   size = 4,
+                   show.legend = FALSE) + 
+  scale_color_manual(values= c("up" = "#FF3D7FFF", "down" = "cornflowerblue", "not regulated" = "grey")) +
+  geom_label_repel(data = subset(volcano_U2AF1.df, abs(log2FoldChange) > 1 & baseMean > 5), # Label genes with significant LFC (up regulation and downregulation)
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL),
+                   point.padding = 0.7,
+                   max.overlaps = 10,
+                   size = 4,
+                   show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Volcano plot (LFC) of U2AF1 and control") + 
+  scale_shape_manual(values = c("TRUE" = 8, "FALSE" = 16)) 
+
+```
+compensatory transcriptional ↑ U2AF2 and SF1 to maintain other splicing interaction efficiency
+
+### U2AF2 dataset
+```{r}
+# Compute -log10(padj)
+volcano_U2AF2.df = dplyr::mutate(res_U2AF2.df, 
+                                 padjIsCorrected = -log10(padj) > 70,
+                                 padj_corrected = case_when(
+                                   padjIsCorrected ~ 70, 
+                                   TRUE ~ -log10(padj)
+                                 ))
+# Volcano plot
+ggplot(volcano_U2AF2.df, aes(x= log2FoldChange, y= padj_corrected, shape= padjIsCorrected, color= up_down, label = SYMBOL)) +
+  geom_point() + 
+  geom_point(data = subset(volcano_U2AF2.df, !is.na(myLabel)),
+             fill = "#FFCC65FF", color = "black", size = 3, shape = 21, stroke = 1) + 
+  geom_label_repel(data = subset(volcano_U2AF2.df, !is.na(myLabel)), # label my label
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#FFCC65FF",
+                   point.padding = 0.5,
+                   max.overlaps = 10,
+                   size = 4,
+                   show.legend = FALSE) + 
+  scale_color_manual(values= c("up" = "#FF3D7FFF", "down" = "cornflowerblue", "not regulated" = "grey")) +
+  geom_label_repel(data = subset(volcano_U2AF2.df, abs(log2FoldChange) > 1 & baseMean > 5), # Label genes with significant regulated genes
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL),
+                   point.padding = 0.7,
+                   max.overlaps = 22,
+                   size = 4,
+                   show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Volcano plot (LFC) of U2AF2 and control") + 
+  scale_shape_manual(values = c("TRUE" = 8, "FALSE" = 16)) 
+```
+↑ SF1 preserves early recognition of BP and interacts with U2AF2 for recruiting the U2 snRNP
+
+### SF1 dataset
+```{r}
+# Compute -log10(adj)
+volcano_SF1.df = dplyr::mutate(res_SF1.df, 
+                                 padjIsCorrected = -log10(padj) > 50,
+                                 padj_corrected = case_when(
+                                   padjIsCorrected ~ 50, 
+                                   TRUE ~ -log10(padj)
+                                 ))
+
+# Extract quadrant counts manually:
+SF1_sigreg_quad = volcano_SF1.df %>%
+  filter(abs(log2FoldChange) > 1 & padj < 0.05) %>%
+  dplyr::select(c(GeneID, up_down))
+
+# Volcano plot
+ggplot(volcano_SF1.df, aes(x= log2FoldChange, y= padj_corrected, 
+                           shape= padjIsCorrected, color= up_down, label = SYMBOL)) +
+  geom_point() + 
+  geom_point(data = subset(volcano_SF1.df, !is.na(myLabel)), # Label gene depletion
+             fill = "#FFCC65FF", color = "black", size = 3, shape = 21, stroke = 1) + 
+  geom_label_repel(data = subset(volcano_SF1.df, !is.na(myLabel)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#FFCC65FF",
+                   point.padding = 0.5,
+                   max.overlaps = 10,
+                   size = 4,
+                   show.legend = FALSE) + 
+  scale_color_manual(values= c("up" = "#FF3D7FFF", "down" = "cornflowerblue", "not regulated" = "grey")) +
+  geom_label_repel(data = subset(volcano_SF1.df, abs(log2FoldChange) > 1 & baseMean > 5), # Label genes with significant regulated genes
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL),
+                   point.padding = 0.7,
+                   max.overlaps = 10,
+                   size = 4,
+                   show.legend = FALSE) +
+  theme_minimal() +
+  labs(title = "Volcano plot (LFC) of SF1 and control") + 
+  scale_shape_manual(values = c("TRUE" = 8, "FALSE" = 16)) 
+
+```
+U2AF2 mild ↑ ➔ possibly to counteract early spliceosome defects from SF1 loss
+Question: Why U2AF1 loss cause downregulation in U2AF1? 
+
+:::
+
+## Alluvial diagram of gene regulation across 3 knockdowns
+```{r}
+# use imap() to get both data and name of df in the list 
+res_list_clean = purrr::imap(res_list, function(x,cond) {
+  x %>%
+    dplyr::select(c("GeneID", "up_down")) %>%
+    dplyr::rename(!!cond := up_down)}) # gives a column named of condition instead of "up_down"
+
+# create df for alluvial diagram
+# Join all 3 by GeneID
+alluvial_df = purrr::reduce(res_list_clean, left_join, by = "GeneID")
+
+# check whether there is any NA value in df
+#alluvial_df[is.na(alluvial_df)]
+
+# Convert into alluvial format
+alluvial_df2 = alluvial_df %>%
+  group_by(U2AF2, U2AF1, SF1) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(U2AF2 = factor(U2AF2, levels = c("up","not regulated", "down")))
+
+alluvial_df2
+
+ggplot(alluvial_df2,
+       aes(axis1 = U2AF2, 
+            axis2 = U2AF1, 
+            axis3 = SF1,
+            y = n)) + 
+  # Flow with unique color for each combination
+  geom_alluvium(aes(fill = U2AF2), width = 1/3, alpha = 0.7) + 
+  
+  # Strata color by first variable
+  geom_stratum(color = "black", width = 0.3, alpha = .1) +  
+
+  # Text for strata
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(stratum)), 
+            size = 3.5) +  
+
+  # Text for total numbers of genes in each stratum
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(count)), 
+            nudge_y = 700, 
+            size = 3.5, 
+            check_overlap = TRUE) +  
+
+  scale_x_discrete(limits = c("U2AF2", "U2AF1", "SF1"), expand = c(0.05, 0.05)) +  
+  
+  # Manual fill colors for up/down/not regulated
+  scale_fill_manual(values = c(
+    "up" = "#F5B355",
+    "down" = "#BD241EFF",
+    "not regulated" = "#4D6291")) +
+  
+  labs(y = "Gene Count", x = "KD Condition",
+       title = "Alluvial Diagram of Gene Regulation Across KD Conditions") +  
+
+  theme_alluvial(base_size = 12) +  
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(face = "bold", size = 12))
+
+```
+
+
+
+```{r}
+# use imap() to get both data and name of df in the list 
+res_list_bmb5 = purrr::imap(res_list, function(x,cond) {
+  x %>%
+    filter(baseMean > 5) %>%
+    dplyr::select(c("GeneID", "up_down")) %>%
+    dplyr::rename(!!cond := up_down)}) # gives a column named of condition instead of "up_down"
+
+# create df for alluvial diagram
+# Join all 3 by GeneID
+alluvial_bm5_df = purrr::reduce(res_list_bmb5, left_join, by = "GeneID")
+
+# check whether there is any NA value in df
+#alluvial_df[is.na(alluvial_df)]
+
+# Convert into alluvial format
+alluvial_bm5_df2 = alluvial_bm5_df %>%
+  group_by(U2AF2, U2AF1, SF1) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(U2AF2 = factor(U2AF2, levels = c("up","not regulated", "down")))
+
+ggplot(alluvial_bm5_df2,
+       aes(axis1 = U2AF2, 
+            axis2 = U2AF1, 
+            axis3 = SF1,
+            y = n)) + 
+  # Flow with unique color for each combination
+  geom_alluvium(aes(fill = U2AF2), width = 1/3, alpha = 0.7) + 
+  
+  # Strata color by first variable
+  geom_stratum(color = "black", width = 0.3, alpha = .1) +  
+
+  # Text for strata
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(stratum)), 
+            size = 3.5) +  
+
+  # Text for total numbers of genes in each stratum
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(count)), 
+            nudge_y = 700, 
+            size = 3.5, 
+            check_overlap = TRUE) +  
+
+  scale_x_discrete(limits = c("U2AF2", "U2AF1", "SF1"), expand = c(0.05, 0.05)) +  
+  
+  # Manual fill colors for up/down/not regulated
+  scale_fill_manual(values = c(
+    "up" = "#F5B355",
+    "down" = "#BD241EFF",
+    "not regulated" = "#4D6291")) +
+  
+  labs(y = "Gene Count", x = "KD Condition",
+       title = "Alluvial Diagram of Gene Regulation Across KD Conditions") +  
+
+  theme_alluvial(base_size = 12) +  
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(face = "bold", size = 12))
+```
+
+### Upregulated genes in all 3 datasets
+```{r}
+# Extract genes upregulated in all 3 datasets
+up_genes_all <- alluvial_df %>%
+  filter(if_all(-GeneID, ~ . == "up")) %>%
+  pull(GeneID)
+
+ego_up_genes_all = enrichGO(gene = up_genes_all,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",          
+                pAdjustMethod = "BH",
+                readable = TRUE)
+
+#as.data.frame(ego_wp2_sigreg_U2AF2_genes)
+
+dotplot(ego_up_genes_all, showCategory = 13, font.size = 6,
+        title = "GO Enrichment of upregulated genes upon 3 KDs") + 
+  theme_bw() 
+  
+# https://biit.cs.ut.ee/gplink/l/agc7Vfi3RRt
+gpro_up_genes_all = gost(query = up_genes_all, # input geneIDs 
+                organism = "hsapiens", # organism of interest 
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated")
+#                as_short_link = TRUE) # domain scope
+
+# Filter for the term of interest
+#gene_expression_upall_df <- gpro_up_genes_all$result[grepl("gene expression|splicing|transcription", gpro_up_genes_all$result$term_name, ignore.case = TRUE), ]
+
+# Extract the genes contributing to this GO term
+#gene_expression_upall = unique(unlist(strsplit(gene_expression_upall_df$intersection, split = ",")))
+
+```
+
+### Downregulated genes in all 3 datasets
+```{r}
+# Extract genes downregulated in all 3 datasets
+down_genes_all <- alluvial_df %>%
+  filter(if_all(-GeneID, ~ . == "down")) %>%
+  pull(GeneID)
+
+ego_down_genes_all = enrichGO(gene = down_genes_all,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",          
+                pAdjustMethod = "BH",
+                readable = TRUE)
+
+#as.data.frame(ego_wp2_sigreg_U2AF2_genes)
+
+dotplot(ego_down_genes_all, showCategory = 15, font.size = 7,
+        title = "GO Enrichment of downregulated genes upon 3 KDs") + 
+  theme_bw() 
+
+# https://biit.cs.ut.ee/gplink/l/alRmZjbYHRu
+gpro_down_genes_all = gost(query = down_genes_all, # input geneIDs 
+                organism = "hsapiens", # organism of interest 
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated",
+                as_short_link = TRUE) # domain scope
+```
+
+## Heatmap
+This heatmap shows gene expression patterns across all samples (with rows representing genes and columns representing samples) to visualize co-regulated genes or differential expressed genes.
+Z-score is values representing how far a data point is from the mean, in units of standard deviation (sds - variation in gene expression). The result later can be used for clustering relative expression genes. 
+
+### Normalization:
+The count data of a particular generepresenting the number of sequence reads that reflects both gene expression and various technical factors. The higher the number of counts, the more reads associated with that gene, and the assumption that there was a higher level of expression of that gene in the sample.
+The counts of mapped reads for each gene is proportional to the expression of RNA (“interesting”) in addition to many other factors (“uninteresting”). Normalization is the process of scaling raw count values to account for the “uninteresting” factors. Normalization is essential to correct for these biases (e.g., sequencing depth, gene length, RNA composition), ensuring the expression levels are more comparable between and within samples and accurately reflect biological differences.
+
+Key factors addressed during normalization:
+- Sequencing depth: Adjusts for varying numbers of reads per sample.
+- Gene length: Important for transcript-level quantification.
+- RNA composition: Accounts for highly expressed genes skewing the distribution.
+https://hbctraining.github.io/Training-modules/planning_successful_rnaseq/lessons/sample_level_QC.html 
+```{r}
+dds = readRDS(paste0(mydir, "dds_DESeq2.dds"))
+
+#Get normalized read counts of dds result
+dds_count = DESeq2::counts(dds, normalized = TRUE)
+
+#dds_count_df = as.data.frame(dds_count)
+
+#rename rownames by remove the version of genes
+rownames(dds_count) = sub("\\..*", "", rownames(dds_count))
+
+# Convert into matrix
+dds_matrix = as.matrix(dds_count)
+
+# z-score normalization
+# s1: remove rows without read counts
+matrix_nozero = dds_matrix[apply(dds_matrix, MARGIN = 1, function(x)any(x!=0)), ] # MARGIN = 1 → operate across rows
+                                                                                  # MARGIN = 2 → operate across columns
+
+#calculate z-score (pairwise distances) 
+# s2: calculate rowmean
+rowmeans = rowMeans(matrix_nozero, na.rm = TRUE)
+
+# s3: calculate row-wise standard deviation
+sds = apply(matrix_nozero, MARGIN = 1, function(x) sd(x, na.rm = TRUE))
+
+matrix_nozero = matrix_nozero - rowmeans # gene expression value - row mean
+
+# s4: Z-score normalization
+matrix_nozero = matrix_nozero/sds
+
+# Replace NA value with 0
+matrix_nozero[is.na(matrix_nozero)] = 0
+```
+Now we have a matrix (matrix_nozero) containing z-scores. Z-score normalization per gene (row), which standardizes the expression across samples (each row will have a mean ~0 and std ~1 (except for rows with constant values)). Z-score is a form of standardization, but not a normalization method for RNA-seq counts.
+What you did:
+For each gene, you subtract the mean and divide by the standard deviation across samples.
+This gives relative up/down patterns per gene (red = higher than average, blue = lower).
+Purpose: visualize patterns/clustering, not absolute expression levels.
+
+### K-means clustering calculation
+The first step when using k-means clustering is to indicate the number of clusters (k) that will be generated in the final solution. The algorithm starts by randomly selecting k objects from the data set to serve as the initial centers for the clusters. The selected objects are also known as cluster means or centroids. Next, each of the remaining objects is assigned to it’s closest centroid, where closest is defined using the Euclidean distance (Eq. 1) between the object and the cluster mean. This step is called “cluster assignment step”. After the assignment step, the algorithm computes the new mean value of each cluster. The term cluster “centroid update” is used to design this step. Now that the centers have been recalculated, every observation is checked again to see if it might be closer to a different cluster. All the objects are reassigned again using the updated cluster means. The cluster assignment and centroid update steps are iteratively repeated until the cluster assignments stop changing (i.e until convergence is achieved). That is, the clusters formed in the current iteration are the same as those obtained in the previous iteration.(with nstart is a number of random initial configurations (random sets of cluster centroids) the algorithm will try.)
+https://uc-r.github.io/kmeans_clustering 
+### Column cluster by genes
+```{r}
+set.seed(123)
+
+columncluster = kmeans(t(matrix_nozero), centers = 5, nstart = 25) # t stands for transpose
+
+# Extract and sort column cluster order
+columnclusterorder = columncluster$cluster
+
+columnclustersort = order(columnclusterorder)
+
+# Correct diverging color palette (from blue to white to red)
+#coLor = colorRamp2(c(-1, 0, 1), c("#0E54B6FF", "white", "#BD241EFF"))
+
+coLor = colorRamp2(c(-1, 0, 1), c("#0E54B6FF", "white", "#BD241EFF"))
+```
+
+### Heatmap with different kmeans to identify best clustering
+```{r}
+# create a cluster list for later extract
+cluster_list = list()
+
+for (k in 5:9) {
+  # cluster rows
+  set.seed(123)
+
+  ######################### 1. K-MEANS CLUSTERING
+  rowclustermatrix = kmeans(matrix_nozero, centers = k, nstart = 25) 
+
+  # assign result of kmeans to cluster list kk
+  cluster_list[[paste0("k", k)]] = rowclustermatrix
+  
+  # extract the clusters
+  rowclusterorder = rowclustermatrix$cluster # use $ to isolate cluster in rowclustermatrix
+
+  # sort the rows according to the cluster
+  rowclustersort = order(rowclusterorder)
+
+  # Rearrange normalized matrix according to clustering results so similar genes/samples appear together in the heatmap.
+  dds_mat = matrix_nozero[rowclustersort, columnclustersort]
+
+  ######################### 2. Regulation annotations for each knockdown condition 
+  # Annotate each rows (genes) on heatmap to see whether it's upregulated, downregulated, or not regulated across different samples.
+  # U2AF1
+  U2AF1_anno = rowAnnotation(shRNA_U2AF1 = res_U2AF1.df$up_down[match(rownames(dds_mat),res_U2AF1.df$GeneID)],
+                           col = list(shRNA_U2AF1 = c("up" = "darkorange", "down" = "#009E73", "not regulated" = NA)),
+                           annotation_name_gp = gpar(fontsize = 8))
+  # U2AF2 
+  U2AF2_anno = rowAnnotation(shRNA_U2AF2 = res_U2AF2.df$up_down[match(rownames(dds_mat),res_U2AF2.df$GeneID)],
+                           col = list(shRNA_U2AF2 = c("up" = "darkorange", "down" = "#009E73", "not regulated" = NA)),
+                           annotation_name_gp = gpar(fontsize = 8))
+  # SF1
+  SF1_anno = rowAnnotation(shRNA_SF1 = res_SF1.df$up_down[match(rownames(dds_mat),res_SF1.df$GeneID)],
+                           col = list(shRNA_SF1 = c("up" = "darkorange", "down" = "#009E73", "not regulated" = NA)),
+                           annotation_name_gp = gpar(fontsize = 8))
+
+  ########################## 3. Create bar box annotation for each row cluster
+  # Extract the cluster assignments from the kmeans result
+  row_split = rowclustermatrix$cluster  # numeric vector: cluster for each gene
+
+  # Sort to match heatmap row order
+  row_split = row_split[rowclustersort]
+
+  # Ensure names match your heatmap matrix
+  names(row_split) = rownames(dds_mat)
+
+  # Identify splicing-related genes (TRUE/FALSE for each gene)
+  splicing_genes_barplot <- rownames(dds_mat) %in% as_anno$splice_ENSEMBL
+
+  # Get unique clusters (in sorted order)
+  cluster_levels = sort(unique(row_split))
+
+  # Count splicing genes per cluster
+  splicing_counts = sapply(cluster_levels, function(cluster) {
+    sum(splicing_genes_barplot[row_split == cluster])
+  })
+
+  # Map the cluster-wise counts to each row (gene) in the matrix
+  splice_bar_values = splicing_counts[match(row_split, cluster_levels)]
+
+  # Show label only once per cluster
+  bar_labels = ifelse(!duplicated(row_split), splice_bar_values, "")
+
+  ############################ 4. Barplot annotation OF NUMBER OF SPLICE FACTORS
+  ha = rowAnnotation(
+    splice_count = anno_barplot(
+      splice_bar_values,
+      gp = gpar(col = "#0E54B6FF", fill = "#0E54B6FF"),
+      bar_width = 0.8,
+      width = unit(2, "cm"),
+    axis_param = list(
+      at = c(0, max(splice_bar_values, na.rm = TRUE)),
+      labels = c("0", as.character(max(splice_bar_values, na.rm = TRUE))),
+      gp = gpar(fontsize = 8)
+     )
+    ),
+    bar_label = anno_text(
+      bar_labels,
+      gp = gpar(fontsize = 8),
+      just = "left",
+      location = 0.1),
+    annotation_name_gp = gpar(fontsize = 9, fontface = "bold"), # Set the name of this label column
+    annotation_name_rot = 0) # Horizontal text for title
+  
+    ############################ 5. HEATMAP
+  hm = ComplexHeatmap::Heatmap(dds_mat, 
+        cluster_columns = FALSE, 
+        cluster_rows = FALSE,
+        use_raster = TRUE,
+        show_row_names = FALSE,
+        col = coLor,
+        column_title = "Heatmap showing differential gene expression among 3KDs",
+        name = "z-score",
+        row_split = rowclusterorder[rowclustersort],
+        border = TRUE,
+        column_names_gp = gpar(fontsize=8),# change the font size of column name
+        right_annotation = c(U2AF1_anno, U2AF2_anno, SF1_anno, ha))
+  
+  print(hm)
+}
+```
+
+## Interested cluster 
+### GO enirchment all regulated genes of specific cluster
+#### k6, c1, c5
+```{r}
+######################## Only regulated genes
+genes_k6_c1 = names(which(cluster_list[["k6"]]$cluster == 1))
+genes_k6_c5 = names(which(cluster_list[["k6"]]$cluster == 5))
+
+genes_k6_c1_c5 = union(genes_k6_c1, genes_k6_c5)
+
+# GO enrich all regulated gene in cluster 4
+ego_genes_k6_c15 = enrichGO(gene = genes_k6_c1_c5,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = TRUE)
+
+# Dotplot of GO result
+dotplot(ego_genes_k6_c15, showCategory = 17) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of all genes in cluster1,5 (kmean=6)")
+
+# https://biit.cs.ut.ee/gplink/l/aczkZsEbgT7
+gpro_genes_k6_c1 = gost(query = genes_k6_c1_c5, # input geneIDs 
+                organism = "hsapiens", # organism of interest 
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated",
+                as_short_link = TRUE) # domain scope
+```
+
+#### k6, c2, c6
+```{r}
+######################## Only regulated genes
+genes_k6_c2 = names(which(cluster_list[["k6"]]$cluster == 2))
+genes_k6_c6 = names(which(cluster_list[["k6"]]$cluster == 6))
+
+genes_k6_c2_c6 <- union(genes_k6_c2, genes_k6_c6)
+
+# GO enrich all regulated gene in cluster 5
+ego_genes_k6_c2_c6 = enrichGO(gene = genes_k6_c2_c6,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = TRUE)
+
+# Dotplot of GO result
+dotplot(ego_genes_k6_c2_c6, showCategory = 13, font.size = 5) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of all genes in cluster 2, 6 (kmean=6)")
+
+# https://biit.cs.ut.ee/gplink/l/aLCY7NV-BRF
+gpro_ego_genes_k6_c2_c6 = gost(query = ego_genes_k6_c2_c6, # input geneIDs 
+                organism = "hsapiens", # organism of interest 
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated",
+                as_short_link = TRUE) # domain scope
+```
+
+#### Upregulated genes
+```{r}
+# Extract genes downregulated in 3 datasets
+genes_k6_c2_c6_df = purrr::map(res_list, function(df) filter(df, GeneID %in% genes_k6_c2_c6))
+
+up_all_k6_c2_c6 = purrr::map(genes_k6_c2_c6_df, function(df) filter(df, up_down == "up"))
+
+# GO enrich all upregulated gene in cluster 5
+ego_genes_up_k6_c2_c6 = enrichGO(gene = up_all_k6_c2_c6$U2AF1$GeneID,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = TRUE)
+
+# Dotplot of GO result
+dotplot(ego_genes_up_k6_c2_c6, showCategory = 13, font.size = 5) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of upregulated genes in cluster 2, 6 (kmean=6)")
+```
+
+
+### How many of downregulated genes in c26 are splicing factors?
+```{r}
+down_all_k6_c2_c6 = purrr::map(genes_k6_c2_c6_df, function(df) filter(df, up_down == "down"))
+
+down_all_k6_c2_c6_genes = unique(c(
+  down_all_k6_c2_c6$U2AF1$SYMBOL,
+  down_all_k6_c2_c6$U2AF2$SYMBOL,
+  down_all_k6_c2_c6$SF1$SYMBOL
+))
+
+ggven_down_cluster2_SF = list(
+  down_in_U2AF1 = down_all_k6_c2_c6$U2AF1$GeneID, 
+  down_in_U2AF2 = down_all_k6_c2_c6$U2AF2$GeneID,
+  down_in_SF1 = down_all_k6_c2_c6$SF1$GeneID,
+  Splicing_factors = as_anno$splice_ENSEMBL)
+
+plot(eulerr::euler(ggven_down_cluster2_SF),
+       fills = list(fill = c("#BD241EFF", "#F5B355", "cornflowerblue", "lightgreen"), alpha = 0.5),
+       quantities = TRUE,
+       stroke_size = 1, # control border size
+       set_name_size = 1, # set name size
+       text_size = 2)
+```
+
+### How do 139 SF genes (in cluster 2 and 6) expression (in which direction)?
+
+```{r}
+# All genes downregulated
+allgenes_k6_c2_c6 = unique(c(
+  genes_k6_c2_c6_df$U2AF1$GeneID,
+  genes_k6_c2_c6_df$U2AF2$GeneID,
+  genes_k6_c2_c6_df$SF1$GeneID
+))
+
+# filter only SF 
+allSFgenes_k6_c2_c6 = as_anno[as_anno$splice_ENSEMBL %in% allgenes_k6_c2_c6,]
+```
+::: panel-tabset
+
+### U2AF1
+```{r}
+############################# Volcano Plot
+# convert small padj into larger -log10(padj) value and padjIsCorrected ~ 50 is used to scale up the value for better visualization
+volcano_U2AF1.df = dplyr::mutate(res_list$U2AF1, 
+                               SFgenes = case_when(SYMBOL %in% as_anno$splice_SYMBOL ~ SYMBOL,
+                                                    TRUE ~ NA_character_),
+                                 myLabel = case_when(SYMBOL %in% allSFgenes_k6_c2_c6$splice_SYMBOL ~ SYMBOL,
+                                                    TRUE ~ NA_character_),
+                                  padjIsCorrected = -log10(padj) > 35, # If -log10(padj) is greater than 50, mark it as TRUE.
+                                  padj_corrected = case_when(
+                                    padjIsCorrected ~ 35, 
+                                    TRUE ~ -log10(padj)
+                                    ))
+
+# Volcano plot of U2AF1
+ggplot(volcano_U2AF1.df, aes(x= log2FoldChange, y= padj_corrected, shape= padjIsCorrected, color= up_down, label= myLabel)) +
+  geom_point() +
+   geom_point(data = subset(volcano_U2AF1.df, !is.na(SFgenes)),
+             fill = "#FFCC65FF", size = 3, shape = 21, stroke = 1) +  
+  geom_label_repel(data = subset(volcano_U2AF1.df, !is.na(SFgenes)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#FFCC65FF",
+                   size = 4,
+                   show.legend = FALSE) +
+  geom_point(data = subset(volcano_U2AF1.df, !is.na(myLabel)),
+             fill = "#009E73", color = "black", size = 2, shape = 21, stroke = 1, alpha = 0.8) +
+  geom_label_repel(data = subset(volcano_U2AF1.df, !is.na(myLabel)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#009E73",
+                   alpha = 0.8,
+                   size = 4,
+                   point.padding = 0.7,
+                   max.overlaps = 40,
+                   size = 4,
+                   show.legend = FALSE) +
+  scale_color_manual(values= c("up" = "#FF3D7FFF", "down" = "cornflowerblue", "not regulated" = "grey")) +
+  theme_minimal() +
+  labs(title = "Volcano plot (LFC) of U2AF1 and control") + 
+  scale_shape_manual(values = c("TRUE" = 8, "FALSE" = 16)) + 
+  geom_vline(xintercept = 0, linetype= "dashed", color = "black", size = 0.7) +
+  stat_quadrant_counts(data = subset(volcano_U2AF1.df, !is.na(myLabel)), 
+                       aes(label = after_stat(count.label)), 
+                       size = 5, vjust = 8)
+
+############################# MA Plot
+allSF_U2AF1_c26_df = as.data.frame(volcano_U2AF1.df) %>%
+  dplyr::filter(SYMBOL %in% as_anno$splice_SYMBOL)
+
+# Use the 110 SF subset (from your annotation)
+SF_U2AF1_c26_subset = volcano_U2AF1.df %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(myLabel))   # myLabel marks only the 110 genes
+
+ggplot(SF_U2AF1_c26_df, aes(x = log10(baseMean), y = log2FoldChange)) +
+  geom_point(color="grey70", size=3) +   # all genes background
+  geom_point(data = SF_U2AF1_c26_subset, aes(x = log10(baseMean), y = log2FoldChange),
+             color="#BD241EFF", size=3, alpha = 0.7) +             # highlight 110
+  geom_text_repel(data = SF_U2AF1_c26_subset,
+                  aes(label = myLabel),
+                  size = 3, max.overlaps = 10, box.padding = 0.5) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  labs(title="MA plot (U2AF1 KD, 110 SF genes highlighted)",
+       x="log10(baseMean)",
+       y="log2 Fold Change") +
+  theme_minimal()
+
+```
+
+### U2AF2
+```{r}
+############################# Volcano Plot
+# convert small padj into larger -log10(padj) value and padjIsCorrected ~ 50 is used to scale up the value for better visualization
+volcano_U2AF2.df = dplyr::mutate(res_list$U2AF2, 
+                               SFgenes = case_when(SYMBOL %in% as_anno$splice_SYMBOL ~ SYMBOL,
+                                                    TRUE ~ NA_character_),
+                                 myLabel = case_when(SYMBOL %in% allSFgenes_k6_c2_c6$splice_SYMBOL ~ SYMBOL,
+                                                    TRUE ~ NA_character_),
+                                  padjIsCorrected = -log10(padj) > 50, # If -log10(padj) is greater than 50, mark it as TRUE.
+                                  padj_corrected = case_when(
+                                    padjIsCorrected ~ 50, 
+                                    TRUE ~ -log10(padj)
+                                    ))
+
+# Volcano plot of U2AF1
+ggplot(volcano_U2AF2.df, aes(x= log2FoldChange, y= padj_corrected, shape= padjIsCorrected, color= up_down, label= myLabel)) +
+  geom_point() +
+  geom_point(data = subset(volcano_U2AF2.df, !is.na(SFgenes)),
+             fill = "#FFCC65FF", size = 3, shape = 21, stroke = 1) +  
+  geom_label_repel(data = subset(volcano_U2AF2.df, !is.na(SFgenes)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#FFCC65FF",
+                   size = 4,
+                   show.legend = FALSE) +
+  geom_point(data = subset(volcano_U2AF2.df, !is.na(myLabel)),
+             fill = "#009E73", color = "black", size = 3, shape = 21, stroke = 1, alpha = 0.8) +
+  geom_label_repel(data = subset(volcano_U2AF2.df, !is.na(myLabel)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#009E73",
+                   alpha = 0.8,
+                   size = 4,
+                   point.padding = 0.7,
+                   max.overlaps = 40,
+                   size = 4,
+                   show.legend = FALSE) +
+  scale_color_manual(values= c("up" = "#FF3D7FFF", "down" = "cornflowerblue", "not regulated" = "grey")) +
+  theme_minimal() +
+  labs(title = "SF genes of interest expression upon U2AF2 KD") + 
+  scale_shape_manual(values = c("TRUE" = 8, "FALSE" = 16)) + 
+  geom_vline(xintercept = 0, linetype= "dashed", color = "black", size = 0.7) +
+  stat_quadrant_counts(data = subset(volcano_U2AF2.df, !is.na(myLabel)), 
+                       aes(label = after_stat(count.label)), 
+                       size = 5, vjust = 8)
+
+############################# MA plot
+allSF_U2AF2_c26_df = as.data.frame(volcano_U2AF2.df) %>%
+  dplyr::filter(SYMBOL %in% as_anno$splice_SYMBOL)
+
+# Use the 110 SF subset (from your annotation)
+SF_U2AF2_c26_subset = volcano_U2AF2.df %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(myLabel))   # myLabel marks only the 110 genes
+
+ggplot(allSF_U2AF2_c26_df, aes(x = log10(baseMean), y = log2FoldChange)) +
+  geom_point(color="grey70", size=3) +   # all genes background
+  geom_point(data = SF_U2AF2_c26_subset, aes(x = log10(baseMean), y = log2FoldChange),
+             color="#BD241EFF", size=3, alpha = 0.7) +             # highlight 110
+  geom_text_repel(data = SF_U2AF2_c26_subset,
+                  aes(label = myLabel),
+                  size = 3, max.overlaps = 10, box.padding = 0.5) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  labs(title="MA plot (U2AF2 KD, 139 SF genes highlighted)",
+       x="log10(baseMean)",
+       y="log2 Fold Change") +
+  theme_minimal()
+```
+
+### SF1
+```{r}
+############################# Volcano plot
+# convert small padj into larger -log10(padj) value and padjIsCorrected ~ 50 is used to scale up the value for better visualization
+volcano_SF1.df = dplyr::mutate(res_list$SF1, 
+                               SFgenes = case_when(SYMBOL %in% as_anno$splice_SYMBOL ~ SYMBOL,
+                                                    TRUE ~ NA_character_),
+                                 myLabel = case_when(SYMBOL %in% allSFgenes_k6_c2_c6$splice_SYMBOL ~ SYMBOL,
+                                                    TRUE ~ NA_character_),
+                                  padjIsCorrected = -log10(padj) > 35, # If -log10(padj) is greater than 50, mark it as TRUE.
+                                  padj_corrected = case_when(
+                                    padjIsCorrected ~ 35, 
+                                    TRUE ~ -log10(padj)
+                                    ))
+#subset(allSFgenes_k6_c2_c6, splice_SYMBOL == "SF1")
+# Volcano plot of U2AF1
+ggplot(volcano_SF1.df, aes(x= log2FoldChange, y= padj_corrected, shape= padjIsCorrected, color= up_down, label= myLabel)) +
+  geom_point() +
+   geom_point(data = subset(volcano_SF1.df, !is.na(SFgenes)),
+             fill = "#FFCC65FF", size = 3, shape = 21, stroke = 1) +  
+  geom_label_repel(data = subset(volcano_SF1.df, !is.na(SFgenes)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#FFCC65FF",
+                   size = 4,
+                   show.legend = FALSE) +
+  geom_point(data = subset(volcano_SF1.df, !is.na(myLabel)),
+             fill = "#009E73", color = "black", size = 3, shape = 21, stroke = 1, alpha = 0.8) +
+  geom_label_repel(data = subset(volcano_SF1.df, !is.na(myLabel)), 
+                   aes(x = log2FoldChange,
+                       y = padj_corrected,
+                       label = SYMBOL,
+                       fontface = "bold"),
+                   color = "black",
+                   fill = "#009E73",
+                   alpha = 0.8,
+                   size = 4,
+                   point.padding = 0.7,
+                   max.overlaps = 40,
+                   size = 4,
+                   show.legend = FALSE) +
+  scale_color_manual(values= c("up" = "#FF3D7FFF", "down" = "cornflowerblue", "not regulated" = "grey")) +
+  theme_minimal() +
+  labs(title = "Volcano plot (LFC) of SF1 and control") + 
+  scale_shape_manual(values = c("TRUE" = 8, "FALSE" = 16)) + 
+  geom_vline(xintercept =0, linetype= "dashed", color = "black", size = 0.7) +
+  stat_quadrant_counts(data = subset(volcano_SF1.df, !is.na(myLabel)), 
+                       aes(label = after_stat(count.label)), 
+                       size = 5, vjust = 8)
+
+############################# MA plot
+allSF_SF1_c26_df = as.data.frame(volcano_SF1.df) %>%
+  dplyr::filter(SYMBOL %in% as_anno$splice_SYMBOL)
+
+# Use the 110 SF subset (from your annotation)
+SF_SF1_c26_subset = volcano_SF1.df %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(myLabel))   # myLabel marks only the 110 genes
+
+ggplot(allSF_SF1_c26_df, aes(x = log10(baseMean), y = log2FoldChange)) +
+  geom_point(color="grey70", size=3) +   # all genes background
+  geom_point(data = SF_SF1_c26_subset, aes(x = log10(baseMean), y = log2FoldChange),
+             color="#BD241EFF", size=3, alpha = 0.7) +             # highlight 110
+  geom_text_repel(data = SF_SF1_c26_subset,
+                  aes(label = myLabel),
+                  size = 3, max.overlaps = 10, box.padding = 0.5) +
+  geom_hline(yintercept = 0, linetype="dashed") +
+  labs(title="MA plot (SF1 KD, 110 SF genes highlighted)",
+       x="log10(baseMean)",
+       y="log2 Fold Change") +
+  theme_minimal()
+```
+
+:::
+
+```{r}
+SF_sankey_df = purrr::imap(res_list, function(res, condition) {
+  
+  res_sf = res[res$GeneID %in% allSFgenes_k6_c2_c6$splice_ENSEMBL, ]
+  
+  res_sf %>%
+    dplyr::select(GeneID, up_down) %>%
+    mutate(Condition = condition) %>%
+    rename(Regulation = up_down)
+}) %>% bind_rows()
+
+# Convert to wide format
+SF_sankey_df = SF_sankey_df %>%
+  pivot_wider(names_from = Condition, values_from = Regulation)
+
+SF_sankey_df = SF_sankey_df %>%
+  dplyr::mutate(
+    regulation_pattern = case_when(
+      U2AF1 == U2AF2 & U2AF2 == SF1 ~ "Similar in 3",
+      U2AF1 == U2AF2 ~ "Similar in U2AF",
+      U2AF1 == SF1 | U2AF2 == SF1 ~ "Similar in U2AF and SF1",
+      TRUE ~ "Different in 3"
+    ))
+
+# 1. Aggregate combinations by frequency
+sankey_df_count = SF_sankey_df %>%
+  group_by(U2AF1, U2AF2, SF1) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(
+    U2AF1 = factor(U2AF1, levels = c("up","not regulated", "down"))
+  )
+
+# 2. Plot Sankey
+ggplot(sankey_df_count,
+       aes(axis1 = U2AF1, axis2 = U2AF2, axis3 = SF1, y = n)) +
+  geom_alluvium(aes(fill = U2AF1), width = 1/4, alpha = 0.65) +
+  geom_stratum(width = 1/4, color = "black", alpha = 0.1) +
+  # Text for strata
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(stratum)), 
+            size = 3.5, fontface = "bold") +  
+  # Text for total numbers of genes in each stratum
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(count)), 
+            nudge_y = 10, 
+            size = 3.5, 
+            check_overlap = TRUE) + 
+  scale_x_discrete(limits = c("U2AF1", "U2AF2", "SF1"), expand = c(0.05, 0.05)) +
+    # Manual fill colors for up/down/not regulated
+  scale_fill_manual(values = c(
+    "up" = "#F5B355",
+    "down" = "#BD241EFF",
+    "not regulated" = "#4D6291")) +
+  labs(y = "Number of Genes",
+       title = "Regulatory patterns of SF genes across SF perturbations") +
+  theme_alluvial(base_size = 12) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(face = "bold", size = 12))
+```
+
+## Classification of splicing factors in set of 139 genes
+```{r}
+sf_c26 =  allSFgenes_k6_c2_c6 %>%
+  dplyr::select(splice_SYMBOL, splice_ENSEMBL, class) %>%
+  distinct()
+
+# mapping dictionary
+class_map <- c(
+  "U1 snRNP" = "U1",
+  "U2 snRNP" = "U2",
+  "U2 snRNP related" = "U2",
+  "SM proteins" = "tri-snRNP",
+  "U5 snRNP" = "tri-snRNP",
+  "U4/U6 snRNP" = "tri-snRNP",
+  "U4/U6.U5 snRNP" = "tri-snRNP",
+  "LSm proteins" = "tri-snRNP",
+  "A complex" = "pre-B",
+  "B complex" = "pre-B",
+  "PRP19 complex" = "pre-Bac",
+  "Bact complex" = "Bact",
+  "C complex" = "C",
+  "C+ complex" = "C+",
+  "P complex" = "P",
+  "ILS complex" = "ILS",
+  "RNA editing" = "RNA editing",
+ 
+   # everything else to "Other SAPs"
+  "EJC / mRNP" = "Other SAPs",
+  "TREX" = "Other SAPs",
+  "helicase" = "Other SAPs",
+  "hnRNP" = "Other SAPs",
+  "SR proteins" = "Other SAPs",
+  "RNA binding proteins" = "Other SAPs",
+  "RNA metylation" = "Other SAPs",
+  "CBC" = "Other SAPs",
+  "3´end" = "Other SAPs",
+  "RNA degradation" = "Other SAPs",
+  "RISC" = "Other SAPs",
+  "protein kinase" = "Other SAPs",
+  "Other SAPs" = "Other SAPs",
+  "Lysine transferases" = "Other SAPs",
+  "chromatin-related" = "Other SAPs",
+  "Histone transferases" = "Other SAPs",
+  "Polycomb Group Genes" = "Other SAPs",
+  "SWI/SNF Complex Components" = "Other SAPs"
+)
+
+# apply mapping
+sf_c26$merged_class = class_map[allSFgenes_k6_c2_c6$class]
+as_anno$merged_class = class_map[as_anno$class]
+```
+
+::: panel-tabset
+
+### U2AF1
+```{r}
+sf_c26_U2AF1 = res_list$U2AF1[res_list$U2AF1$SYMBOL %in% sf_c26$splice_SYMBOL,] %>% 
+  dplyr::select(log2FoldChange, SYMBOL)
+
+sf_c26_U2AF1 = left_join(sf_c26_U2AF1, sf_c26, by = c("SYMBOL" = "splice_SYMBOL"))
+
+# Make box plot of absolute correlation per class (using target class as example)
+ggplot(sf_c26_U2AF1, aes(x = merged_class, y = log2FoldChange, fill = merged_class)) +
+  geom_boxplot(width = 0.5, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "L2FC distribution of Splicing factors (in cluster 2,6) upon U2AF1 depletion",
+    x = "Splicing Factor Class",
+    y = "log2FoldChange"
+  ) +
+  scale_fill_brewer(palette = "YlOrRd") +  #change the palette
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+```
+### U2AF2
+```{r}
+sf_c26_U2AF2 = res_list$U2AF2[res_list$U2AF2$SYMBOL %in% sf_c26$splice_SYMBOL,] %>% 
+  dplyr::select(log2FoldChange, SYMBOL)
+
+sf_c26_U2AF2 = left_join(sf_c26_U2AF2, sf_c26, by = c("SYMBOL" = "splice_SYMBOL"))
+
+# Make box plot of absolute correlation per class (using target class as example)
+ggplot(sf_c26_U2AF2, aes(x = merged_class, y = log2FoldChange, fill = merged_class)) +
+  geom_boxplot(width = 0.5, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "L2FC distribution of Splicing factors (in cluster 2,6) upon U2AF2 depletion",
+    x = "Splicing Factor Class",
+    y = "log2FoldChange"
+  ) +
+  scale_fill_brewer(palette = "YlOrRd") +  #change the palette
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+```
+
+### S1
+```{r}
+sf_c26_SF1 = res_list$SF1[res_list$SF1$SYMBOL %in% sf_c26$splice_SYMBOL,] %>% 
+  dplyr::select(log2FoldChange, SYMBOL)
+
+sf_c26_SF1 = left_join(sf_c26_SF1, sf_c26, by = c("SYMBOL" = "splice_SYMBOL"))
+
+# Make box plot of absolute correlation per class (using target class as example)
+ggplot(sf_c26_SF1, aes(x = merged_class, y = log2FoldChange, fill = merged_class)) +
+  geom_boxplot(width = 0.5, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "L2FC distribution of Splicing factors (in cluster 2,6) upon SF1 depletion",
+    x = "Splicing Factor Class",
+    y = "log2FoldChange"
+  ) +
+  scale_fill_brewer(palette = "YlOrRd") +  #change the palette
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+```
+
+:::
+
+```{r}
+# Add splice class to Sankey dataframe
+SF_sankey_df2 = SF_sankey_df %>%
+  left_join(sf_c26, by = c("GeneID" = "splice_ENSEMBL"))
+
+# Aggregate by class + regulation patterns
+sankey_df_count = SF_sankey_df2 %>%
+  group_by(merged_class, U2AF1, U2AF2, SF1) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(merged_class = factor(merged_class, levels = c("U1", "U2", "tri-snRNP", "pre-B",
+                                                        "pre-Bact", "Bact", "C", "C+", "P", "ILS", 
+                                                        "Minor", "Other SAPs")),
+         U2AF1 = factor(U2AF1, levels = c("up", "down", "not regulated")),
+         U2AF2 = factor(U2AF2, levels = c("up", "down", "not regulated")),
+         SF1   = factor(SF1,   levels = c("up", "down", "not regulated")))
+
+ggplot(sankey_df_count,
+       aes(axis1 = merged_class, axis2 = U2AF1, axis3 = U2AF2, axis4 = SF1, y = n)) +
+  geom_alluvium(aes(fill = merged_class), width = 1/6, alpha = 0.7) +
+  geom_stratum(width = 1/6, color = "black",  alpha = 0.6) +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum)),
+            size = 3, fontface = "bold") +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(count)),
+            nudge_y = 3.5, size = 3, color = "black") +
+  scale_x_discrete(limits = c("Class", "U2AF1", "U2AF2", "SF1"),
+                   expand = c(0.05, 0.05)) +
+  scale_fill_brewer(palette = "RdYlBu") +
+  labs(y = "Number of Genes",
+       title = "Regulation of Splicing Factor Classes across U2AF1, U2AF2, and SF1 perturbations") +
+  theme_alluvial(base_size = 12) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(face = "bold", size = 12))
+
+```
+
+### Network 
+```{r}
+# obtain source or target genes and correlation values in only overlapping downregulated genes in cluster 2 and 6
+cor_allSFgenes_c26 = correlation_anno %>%
+  filter(so %in% allSFgenes_k6_c2_c6$splice_SYMBOL)
+
+cor2_allSFgenes_c26 = correlation_anno %>%
+  filter(tg %in% allSFgenes_k6_c2_c6$splice_SYMBOL)
+
+# view
+cor2_allSFgenes_c26_df = bind_rows(cor_allSFgenes_c26, cor2_allSFgenes_c26) %>%
+  distinct(edges, .keep_all = TRUE)
+
+SF_regulation_df = purrr::imap(res_list, function(res, condition) {
+  
+  res_sf = res[res$GeneID %in% as_anno$splice_ENSEMBL, ]
+  
+  res_sf %>%
+    dplyr::select(GeneID, up_down) %>%
+    mutate(Condition = condition) %>%
+    rename(Regulation = up_down)
+}) %>% bind_rows()
+
+# Convert to wide format
+SF_regulation_df = SF_regulation_df %>%
+  pivot_wider(names_from = Condition, values_from = Regulation)
+
+SF_regulation_df = SF_regulation_df %>%
+  dplyr::mutate(
+    regulation_pattern = case_when(
+      U2AF1 == U2AF2 & U2AF2 == SF1 ~ "Similar in 3",
+      U2AF1 == U2AF2 ~ "Similar in U2AF",
+      U2AF1 == SF1 ~ "Similar in U2AF1 and SF1",
+      U2AF2 == SF1 ~ "Similar in U2AF2 and SF1",
+      TRUE ~ "Different in 3"
+    ))
+```
+
+
+```{r}
+# Example edge list
+edges = cor2_allSFgenes_c26_df %>% 
+  dplyr::select(so, tg, cor) %>%  # keep only strong links
+  dplyr::arrange(cor) %>%
+  dplyr::rename(source = so, target = tg, correlation = cor) %>% 
+  distinct(source, target, .keep_all = TRUE)
+
+# source, target
+nodes = tibble(name = unique(c(edges$source, edges$target))) %>%
+  left_join(as_anno, by = c("name" = "splice_SYMBOL")) %>% 
+  left_join(SF_regulation_df, by = c("splice_ENSEMBL" = "GeneID")) %>%
+  mutate(
+    regulation_pattern = ifelse(is.na(regulation_pattern), "Unknown", regulation_pattern),
+    clusteringSF = ifelse(name %in% allSFgenes_k6_c2_c6$splice_SYMBOL, "SplicingFactorSet", "Other")
+  )
+
+
+# Build igraph object
+g <- graph_from_data_frame(edges, vertices = nodes, directed = TRUE)
+
+# Add correlation as edge attribute
+E(g)$weight <- edges$correlation
+
+# Edge width proportional to correlation strength
+#E(g)$width <- scales::rescale(abs(E(g)$weight), to = c(1, 5))  # thicker = stronger
+
+```
+
+
+```{r}
+# Node color by class
+V(g)$color <- as.factor(V(g)$merged_class)
+pal <- rainbow(length(unique(V(g)$color)))   # choose a palette
+V(g)$color <- pal[as.numeric(V(g)$color)]
+
+# Layout
+set.seed(42)
+layout1 = layout_with_fr(
+  g, 
+  weights = abs(E(g)$weight), 
+  niter = 20000,   # more iterations = more spread
+  grid = "nogrid"
+)
+
+# Plot in wider canvas
+plot(g,
+     layout = layout1,
+     edge.arrow.size = .5,
+     edge.arrow.mode = "-",
+     vertex.label = V(g)$name,
+     vertex.label.cex = 0.6,
+     vertex.label.color = "black",
+     vertex.frame.color = "grey40",
+     main = "139 Splicing Factors Correlation Network",
+     margin = 0)
+
+layouts <- grep("^layout_", ls("package:igraph"), value=TRUE)[-1] 
+
+# Remove layouts that do not apply to our graph.
+
+layouts <- layouts[!grepl("bipartite|merge|norm|sugiyama|tree", layouts)]
+
+
+
+par(mfrow=c(3,3), mar=c(1,1,1,1))
+
+for (layout in layouts) {
+
+  print(layout)
+
+  l <- do.call(layout, list(g)) 
+
+  plot(g, edge.arrow.mode=0, layout=l, main=layout) }
+
+
+
+```
+
+```{r}
+# Palette with 29 distinct colors
+my_colors <- colorRampPalette(brewer.pal(5, "Set2"))(5)
+
+# --- Plot with node colors by merged_class ---
+set.seed(123)
+ggraph(g, layout = "nicely", weights = E(g)$weight) +
+  geom_edge_link0(aes(color = weight, width = weight), alpha = 1) +
+  geom_node_point(aes(fill = regulation_pattern), shape = 21, size = 3, color = "black") +
+  geom_node_text(aes(label = name), repel = TRUE, size = 4) +
+  scale_edge_color_gradient2(low = "steelblue", mid = "lightyellow", high = "red", midpoint = 0.55, name = "Correlation") +
+  scale_edge_width(range = c(0.2, 1.5), name = "Correlation") +
+  scale_fill_manual(values = my_colors, name = "Expression pattern") + #Node fill legend
+  theme_void() + 
+  theme(
+    legend.position = "right",    
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 8)
+  )
+
+
+```
+
+```{r}
+library(ggforce)
+a_colors <- colorRampPalette(brewer.pal(13, "Paired"))(13)
+ggraph(g, layout = "fr") +
+    geom_mark_hull(aes(x, y, group = clusteringSF, fill = clusteringSF), 
+                 concavity = 3, alpha = 0.3, color = NA) +
+  geom_edge_link0(aes(color = weight, width = weight), alpha = 0.6) +
+  geom_node_point(aes(fill = regulation_pattern), shape = 21, size = 3, color = "black") +
+  geom_node_text(aes(label = name), repel = TRUE, size = 4) +
+  scale_edge_color_gradient2(low = "steelblue", mid = "lightyellow", high = "red",
+                             midpoint = 0.55, name = "Correlation") +
+  scale_edge_width(range = c(0.2, 1.5), name = "Correlation") +
+  scale_fill_manual(values = a_colors, name = "Expression pattern") +
+  theme_void() +
+  theme(legend.position = "right")
+
+```
+
+## Classification of splicing factors in set of 139 genes
+```{r}
+sf_c26 =  allSFgenes_k6_c2_c6 %>%
+  dplyr::select(splice_SYMBOL, splice_ENSEMBL, class) %>%
+  distinct()
+
+# mapping dictionary
+class_map <- c(
+  "U1 snRNP" = "U1",
+  "U2 snRNP" = "U2",
+  "U2 snRNP related" = "U2",
+  "SM proteins" = "tri-snRNP",
+  "U5 snRNP" = "tri-snRNP",
+  "U4/U6 snRNP" = "tri-snRNP",
+  "U4/U6.U5 snRNP" = "tri-snRNP",
+  "LSm proteins" = "tri-snRNP",
+  "A complex" = "pre-B",
+  "B complex" = "pre-B",
+  "PRP19 complex" = "pre-Bac",
+  "Bact complex" = "Bact",
+  "C complex" = "C",
+  "C+ complex" = "C+",
+  "P complex" = "P",
+  "ILS complex" = "ILS",
+  "Minor" = "Minor",
+ 
+   # everything else to "Other SAPs"
+  "EJC / mRNP" = "Other SAPs",
+  "TREX" = "Other SAPs",
+  "helicase" = "Other SAPs",
+  "hnRNP" = "Other SAPs",
+  "SR proteins" = "Other SAPs",
+  "RNA binding proteins" = "Other SAPs",
+  "RNA metylation" = "Other SAPs",
+  "CBC" = "Other SAPs",
+  "3´end" = "Other SAPs",
+  "RNA degradation" = "Other SAPs",
+  "RISC" = "Other SAPs",
+  "protein kinase" = "Other SAPs",
+  "Other SAPs" = "Other SAPs",
+  "Lysine transferases" = "Other SAPs",
+  "chromatin-related" = "Other SAPs",
+  "Histone transferases" = "Other SAPs",
+  "Polycomb Group Genes" = "Other SAPs",
+  "SWI/SNF Complex Components" = "Other SAPs"
+)
+
+# apply mapping
+sf_c26$merged_class = class_map[allSFgenes_k6_c2_c6$class]
+as_anno$merged_class = class_map[as_anno$class]
+```
+
+::: panel-tabset
+
+### U2AF1
+```{r}
+sf_c26_U2AF1 = res_list$U2AF1[res_list$U2AF1$SYMBOL %in% sf_c26$splice_SYMBOL,] %>% 
+  dplyr::select(log2FoldChange, SYMBOL)
+
+sf_c26_U2AF1 = left_join(sf_c26_U2AF1, sf_c26, by = c("SYMBOL" = "splice_SYMBOL"))
+
+# Make box plot of absolute correlation per class (using target class as example)
+p3 <- ggplot(sf_c26_U2AF1, aes(x = merged_class, y = log2FoldChange, fill = merged_class)) +
+  geom_boxplot(width = 0.5, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "L2FC distribution of Splicing factors (in cluster 2,6) upon U2AF1 depletion",
+    x = "Splicing Factor Class",
+    y = "log2FoldChange"
+  ) +
+  scale_fill_brewer(palette = "YlOrRd") +  #change the palette
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+```
+
+### U2AF2
+```{r}
+sf_c26_U2AF2 = res_list$U2AF2[res_list$U2AF2$SYMBOL %in% sf_c26$splice_SYMBOL,] %>% 
+  dplyr::select(log2FoldChange, SYMBOL)
+
+sf_c26_U2AF2 = left_join(sf_c26_U2AF2, sf_c26, by = c("SYMBOL" = "splice_SYMBOL"))
+
+# Make box plot of absolute correlation per class (using target class as example)
+p1 <- ggplot(sf_c26_U2AF2, aes(x = merged_class, y = log2FoldChange, fill = merged_class)) +
+  geom_boxplot(width = 0.5, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "L2FC distribution of Splicing factors (in cluster 2,6) upon U2AF2 depletion",
+    x = "Splicing Factor Class",
+    y = "log2FoldChange"
+  ) +
+  scale_fill_brewer(palette = "YlOrRd") +  #change the palette
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+```
+
+### S1
+```{r eval = FALSE}
+sf_c26_SF1 = res_list$SF1[res_list$SF1$SYMBOL %in% sf_c26$splice_SYMBOL,] %>% 
+  dplyr::select(log2FoldChange, SYMBOL)
+
+sf_c26_SF1 = left_join(sf_c26_SF1, sf_c26, by = c("SYMBOL" = "splice_SYMBOL"))
+
+# Make box plot of absolute correlation per class (using target class as example)
+p2 <- ggplot(sf_c26_SF1, aes(x = merged_class, y = log2FoldChange, fill = merged_class)) +
+  geom_boxplot(width = 0.5, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    title = "L2FC distribution of Splicing factors (in cluster 2,6) upon SF1 depletion",
+    x = "Splicing Factor Class",
+    y = "log2FoldChange"
+  ) +
+  scale_fill_brewer(palette = "YlOrRd") +  #change the palette
+  theme_bw() +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+
+library(patchwork)
+
+(p3 | p1 | p2) + 
+  plot_layout(guides = "collect") & theme(legend.position = "bottom")
+
+```
+
+```{r eval = FALSE}
+# Add splice class to Sankey dataframe
+SF_sankey_df2 = SF_sankey_df %>%
+  left_join(sf_c26, by = c("GeneID" = "splice_ENSEMBL"))
+
+# Aggregate by class + regulation patterns
+sankey_df_count = SF_sankey_df2 %>%
+  group_by(merged_class, U2AF1, U2AF2, SF1) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(merged_class = factor(merged_class, levels = c("U1", "U2", "tri-snRNP", "pre-B",
+                                                        "pre-Bact", "Bact", "C", "C+", "P", "ILS", 
+                                                        "Minor", "Other SAPs")),
+         U2AF1 = factor(U2AF1, levels = c("up", "down", "not regulated")),
+         U2AF2 = factor(U2AF2, levels = c("up", "down", "not regulated")),
+         SF1   = factor(SF1,   levels = c("up", "down", "not regulated")))
+
+ggplot(sankey_df_count,
+       aes(axis1 = merged_class, axis2 = U2AF1, axis3 = U2AF2, axis4 = SF1, y = n)) +
+  geom_alluvium(aes(fill = merged_class), width = 1/6, alpha = 0.7) +
+  geom_stratum(width = 1/6, color = "black",  alpha = 0.6) +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(stratum)),
+            size = 3, fontface = "bold") +
+  geom_text(stat = "stratum",
+            aes(label = after_stat(count)),
+            nudge_y = 3.5, size = 3, color = "black") +
+  scale_x_discrete(limits = c("Class", "U2AF1", "U2AF2", "SF1"),
+                   expand = c(0.05, 0.05)) +
+  scale_fill_brewer(palette = "RdYlBu") +
+  labs(y = "Number of Genes",
+       title = "Regulation of Splicing Factor Classes across U2AF1, U2AF2, and SF1 perturbations") +
+  theme_alluvial(base_size = 12) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(face = "bold", size = 12))
+
+```
+
+
+### Are the splicing factor genes that share down-expression patterns across 3 knockdowns (U2AF1, U2AF2, SF1) correlated or co-regulated?
+I use 7 overlapping genes upon 3 cluster 2 and 6 downregulated-gene sets (as seeds) to find their target or source genes, respectively, and their correlation values.
+My idea is: overlap → correlation → network → screen for splicing factor modules → co-regulation?
+```{r}
+# Get genes overlapping among 3 datasets
+down_all_c26_SF_genes = Reduce(intersect, list(down_all_k6_c2_c6$U2AF1$GeneID,
+                                         down_all_k6_c2_c6$U2AF2$GeneID,
+                                         down_all_k6_c2_c6$SF1$GeneID))
+
+# filter only SF 
+down_all_intersect_SF_genes = as_anno[as_anno$splice_ENSEMBL %in% down_all_c26_SF_genes,]
+
+# obtain source or target genes and correlation values in only overlapping downregulated genes in cluster 2 and 6
+cor_down_all_intersect_SF = correlation_anno %>%
+  filter(so %in% down_all_intersect_SF_genes$splice_SYMBOL |
+           tg %in% down_all_intersect_SF_genes$splice_SYMBOL)
+# view
+cor_down_all_intersect_SF 
+
+cor_down_all_intersect_SF_mat = cor_down_all_intersect_SF %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_down_all_intersect_SF_mat, 
+         method = "square", 
+         is.corr = FALSE,
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+
+```
+
+
+### Uniquely downregulated genes in U2AF1, SF1
+
+::: panel-tabset
+
+#### U2AF1
+```{r}
+################################## U2AF1
+uniq_U2AF1_down_c26_genes = down_all_k6_c2_c6$U2AF1$GeneID[down_all_k6_c2_c6$U2AF1$GeneID %in% 
+                                        setdiff(down_all_k6_c2_c6$U2AF1$GeneID,
+                                                union(down_all_k6_c2_c6$U2AF2$GeneID, down_all_k6_c2_c6$SF1$GeneID))]
+
+uniq_U2AF1_down_c26_SF = intersect(uniq_U2AF1_down_c26_genes, as_anno_genes)
+
+uniq_U2AF1_down_c26_SF = as_anno[as_anno$splice_ENSEMBL %in% uniq_U2AF1_down_c26_SF,]
+
+cor_uniq_U2AF1_down_c26_SF = correlation_anno %>%
+  filter(so %in% uniq_U2AF1_down_c26_SF$splice_SYMBOL)
+
+cor_uniq_U2AF1_down_c26_SF_mat = cor_uniq_U2AF1_down_c26_SF %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_uniq_U2AF1_down_c26_SF_mat, 
+         method = "square",
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+#### SF1
+```{r}
+################################## SF1
+uniq_SF1_down_c26_genes = down_all_k6_c2_c6$SF1$GeneID[down_all_k6_c2_c6$SF1$GeneID %in% 
+                                        setdiff(down_all_k6_c2_c6$SF1$GeneID,
+                                                union(down_all_k6_c2_c6$U2AF2$GeneID, down_all_k6_c2_c6$U2AF1$GeneID))]
+
+uniq_SF1_down_c26_SF = intersect(uniq_SF1_down_c26_genes, as_anno_genes)
+
+uniq_SF1_down_c26_SF = as_anno[as_anno$splice_ENSEMBL %in% uniq_SF1_down_c26_genes,]
+
+cor_uniq_SF1_down_c26_SF = correlation_anno %>%
+  filter(so %in% uniq_SF1_down_c26_SF$splice_SYMBOL|
+         tg %in% uniq_U2AF1_down_c26_SF$splice_SYMBOL)
+
+cor_uniq_SF1_down_c26_SF_mat = cor_uniq_SF1_down_c26_SF %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_uniq_SF1_down_c26_SF_mat, 
+         method = "square", 
+         is.corr = FALSE, 
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+:::
+
+### Co-splicing downregulated between 2 datasets
+
+::: panel-tabset
+
+#### SF1 & U2AF2
+```{r}
+################################## SF1 and U2AF2 
+# Get intersecting genes between U2AF2, SF1, and splicing factors
+U2AF2_SF1_splicing_genes <- Reduce(intersect, list(
+  down_all_k6_c2_c6$SF1$GeneID,
+  down_all_k6_c2_c6$U2AF2$GeneID,
+  as_anno_genes
+))
+
+# Exclude genes also downregulated in U2AF1
+U2AF2_SF1_noU2AF1_genes <- setdiff(
+  U2AF2_SF1_splicing_genes,
+  down_all_k6_c2_c6$U2AF1$GeneID
+)
+
+U2AF2_SF1_noU2AF1_genes_df = as_anno[as_anno$splice_ENSEMBL %in% U2AF2_SF1_noU2AF1_genes,]
+
+cor_U2AF2_SF1_noU2AF1_genes_df = correlation_anno %>%
+  filter(so %in% U2AF2_SF1_noU2AF1_genes_df$splice_SYMBOL)
+
+#cor2_U2AF2_SF1_noU2AF1_genes_df = correlation_anno %>%
+#  filter(tg %in% unique(cor_U2AF2_SF1_noU2AF1_genes_df$so) | 
+#        tg %in% unique(cor_U2AF2_SF1_noU2AF1_genes_df$tg) |
+#        so %in% unique(cor_U2AF2_SF1_noU2AF1_genes_df$tg) |
+#        so %in% unique(cor_U2AF2_SF1_noU2AF1_genes_df$tg))
+
+#cor_U2AF2_SF1_noU2AF1_genes_df = bind_rows(cor_U2AF2_SF1_noU2AF1_genes_df, cor2_U2AF2_SF1_noU2AF1_genes_df) %>%
+#  distinct(edges, .keep_all = TRUE)
+
+cor_U2AF2_SF1_noU2AF1_genes_df_mat = cor_U2AF2_SF1_noU2AF1_genes_df %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_U2AF2_SF1_noU2AF1_genes_df_mat, 
+         method = "square", 
+         is.corr = FALSE, 
+         cl.lim = c(0,1),
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+
+#### U2AF1 & U2AF2
+```{r}
+################################## U2AF1 and U2AF2 
+# Get intersecting genes between U2AF2, SF1, and splicing factors
+U2AF2_U2AF1_splicing_genes <- Reduce(intersect, list(
+  down_all_k6_c2_c6$U2AF1$GeneID,
+  down_all_k6_c2_c6$U2AF2$GeneID,
+  as_anno_genes
+))
+
+# Exclude genes also downregulated in U2AF1
+U2AF2_U2AF1_noSF1_genes <- setdiff(
+  U2AF2_U2AF1_splicing_genes,
+  down_all_k6_c2_c6$SF1$GeneID
+)
+
+U2AF2_U2AF1_noSF1_genes_df = as_anno[as_anno$splice_ENSEMBL %in% U2AF2_U2AF1_noSF1_genes,]
+
+cor_U2AF2_U2AF1_noSF1_genes_df = correlation_anno %>%
+  filter(so %in% U2AF2_U2AF1_noSF1_genes_df$splice_SYMBOL) 
+
+#cor2_U2AF2_U2AF1_noSF1_genes_df = correlation_anno %>%
+#  filter(tg %in% unique(cor_U2AF2_U2AF1_noSF1_genes_df$so) | 
+#        tg %in% unique(cor_U2AF2_U2AF1_noSF1_genes_df$tg) |
+#        so %in% unique(cor_U2AF2_U2AF1_noSF1_genes_df$tg) |
+#        so %in% unique(cor_U2AF2_U2AF1_noSF1_genes_df$tg))
+
+#cor_U2AF2_U2AF1_noSF1_genes_df = bind_rows(cor_U2AF2_U2AF1_noSF1_genes_df, cor2_U2AF2_U2AF1_noSF1_genes_df) %>%
+#  distinct(edges, .keep_all = TRUE)
+
+cor_U2AF2_U2AF1_noSF1_genes_df_mat = cor_U2AF2_U2AF1_noSF1_genes_df %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_U2AF2_U2AF1_noSF1_genes_df_mat, 
+         method = "square", 
+         is.corr = FALSE,
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+:::
+
+### k6, c3, c4
+function for scatter plot
+```{r}
+genes_k6_c3 = names(which(cluster_list[["k6"]]$cluster == 3))
+
+genes_k6_c4 = names(which(cluster_list[["k6"]]$cluster == 4))
+
+# Get genes in the interested clusters
+genes_k6_c3_c4 = union(genes_k6_c3, genes_k6_c4)
+
+# Create a function
+log2FC_compare2 = function(d1, d2, var1, var2) { 
+
+  # Merge 2 datasets in to 1 df
+  d1_d2_df = inner_join(d1, d2, by = "GeneID", suffix = c(var1, var2))
+  
+  #add SYMBOL/ gene name column
+  d1_d2_df$splice_SYMBOL = as_anno$splice_SYMBOL[match(d1_d2_df$GeneID, as_anno$splice_ENSEMBL)]
+  
+  # Add regulated column if a gene regulated either in only 1 dataset or both
+  d1_d2_df = d1_d2_df %>% mutate(
+    regulate_direction = case_when(
+        .[[paste0("regulated", var1)]] == "TRUE"   & .[[paste0("regulated", var2)]] == "TRUE"   ~ "both regulated",
+        .[[paste0("regulated", var1)]] == "TRUE"   & .[[paste0("regulated", var2)]] == "FALSE" ~ paste("only regulated in", var1),
+        .[[paste0("regulated", var1)]] == "FALSE" & .[[paste0("regulated", var2)]] == "TRUE"   ~ paste("only regulated in", var2),
+        .[[paste0("regulated", var1)]] == "FALSE" & .[[paste0("regulated", var2)]] == "FALSE" ~ "none regulation",
+        TRUE ~ NA_character_), # If genes are nonregulated, assign it as NA
+    GOI = case_when(
+      grepl("U2AF2", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("U2AF1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SF1", splice_SYMBOL) ~ splice_SYMBOL,
+      TRUE ~ NA)) # Assign all GOI related to splicing using grepl()
+  
+  # Arrange regulate = FALSE first so they will be plotted first => points will be backwards and remove NA 
+  d1_d2_df$regulate_direction = factor(
+  d1_d2_df$regulate_direction,
+  levels = c("none regulation", "only regulated in U2AF2", "only regulated in U2AF1", "both regulated")
+)
+
+# Then arrange so that "none regulation" comes first
+d1_d2_df = d1_d2_df %>% arrange(regulate_direction)
+
+
+return(d1_d2_df)
+}
+
+```
+
+::: panel-tabset
+
+### U2AF2 and U2AF1 in c3
+```{r}
+res_U2AF2_c3.df = res_U2AF2.df[res_U2AF2.df$GeneID %in% genes_k6_c3, ]
+
+res_U2AF1_c3.df = res_U2AF1.df[res_U2AF1.df$GeneID %in% genes_k6_c3, ]
+
+# apply function on each pair of comparison
+U2AF2_U2AF1_c3_df = log2FC_compare2(res_U2AF2_c3.df, res_U2AF1_c3.df, "U2AF2", "U2AF1")
+
+ggplot(
+  U2AF2_U2AF1_c3_df,
+  aes(x = log2FoldChangeU2AF2, 
+      y = log2FoldChangeU2AF1, 
+      label = splice_SYMBOL, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_U2AF1_c3_df, !is.na(splice_SYMBOL)),
+             color = "black", stroke = 1, size = 2, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both regulated" = "#009E73", 
+               "none regulation" = "grey80", 
+               "only regulated in U2AF1" = "#BD241EFF",
+               "only regulated in U2AF2" = "#F5B355"),
+    na.value = "grey80") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(
+    data = subset(U2AF2_U2AF1_c3_df, !is.na(splice_SYMBOL)),
+    aes(label = splice_SYMBOL, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 70,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.5,      # pull labels toward points
+    show.legend = FALSE,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(aes(group =1), method = "pearson") +
+  labs(
+    x = "log2FC (shRNA U2AF2)",
+    y = "log2FC (shRNA U2AF1)",
+    title = "LFC Scatter plot of cluster 3 genes between U2AF2 and U2AF1") +
+  theme_bw()
+```
+
+
+```{r}
+# Only regulated in U2AF2
+genes_U2AF2_c3_only <- U2AF2_U2AF1_c3_df %>%
+  filter(regulate_direction == "only regulated in U2AF2") %>%
+  pull(GeneID)
+
+# Only regulated in U2AF1
+genes_U2AF1_c3_only <- U2AF2_U2AF1_c3_df %>%
+  filter(regulate_direction == "only regulated in U2AF1") %>%
+  pull(GeneID)
+
+# Regulated in both
+genes_c3_both <- U2AF2_U2AF1_c3_df %>%
+  filter(regulate_direction == "both regulated") %>%
+  pull(GeneID)
+
+# GO enrichment for U2AF2-only
+ego_U2AF2_c3 <- enrichGO(
+  gene          = genes_U2AF2_c3_only,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENSEMBL",   # or "SYMBOL" depending on your IDs
+  ont           = "ALL",        # Biological Process
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# U2AF1-only
+ego_U2AF1_c3 <- enrichGO(
+  gene          = genes_U2AF1_c3_only,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENSEMBL",
+  ont           = "ALL",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# Both regulated
+ego_c3_both <- enrichGO(
+  gene          = genes_c3_both,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENSEMBL",
+  ont           = "ALL",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+dotplot(ego_U2AF1_c3, showCategory = 15, title = "GO BP - Only U2AF1 regulated")
+dotplot(ego_U2AF2_c3, showCategory = 15, title = "GO BP - Only U2AF2 regulated")
+dotplot(ego_c3_both, showCategory = 15, title = "GO BP - Both regulated")
+
+```
+Enrichment in development, apoptosis, and autophagy indicates that these splicing factors influence fundamental cellular programs,
+
+### U2AF2 and U2AF1 in c4
+```{r}
+res_U2AF2_c4.df = res_U2AF2.df[res_U2AF2.df$GeneID %in% genes_k6_c4, ]
+
+res_U2AF1_c4.df = res_U2AF1.df[res_U2AF1.df$GeneID %in% genes_k6_c4, ]
+
+# apply function on each pair of comparison
+U2AF2_U2AF1_c4_df = log2FC_compare2(res_U2AF2_c4.df, res_U2AF1_c4.df, "U2AF2", "U2AF1")
+
+ggplot(
+  U2AF2_U2AF1_c4_df,
+  aes(x = log2FoldChangeU2AF2, 
+      y = log2FoldChangeU2AF1, 
+      label = splice_SYMBOL, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_U2AF1_c4_df, !is.na(splice_SYMBOL)),
+             color = "black", stroke = 1, size = 2, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both regulated" = "#009E73", 
+               "none regulation" = "grey80", 
+               "only regulated in U2AF1" = "#BD241EFF",
+               "only regulated in U2AF2" = "#F5B355"),
+    na.value = "grey80") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(
+    data = subset(U2AF2_U2AF1_c4_df, !is.na(splice_SYMBOL)),
+    aes(label = splice_SYMBOL, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 70,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.5,      # pull labels toward points
+    show.legend = FALSE,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(aes(group =1), method = "pearson") +
+  labs(
+    x = "log2FC (shRNA U2AF2)",
+    y = "log2FC (shRNA U2AF1)",
+    title = "LFC Scatter plot of cluster 4 genes between U2AF2 and U2AF1") +
+  theme_bw()
+```
+
+
+```{r}
+# Only regulated in U2AF2
+genes_U2AF2_c4_only <- U2AF2_U2AF1_c4_df %>%
+  filter(regulate_direction == "only regulated in U2AF2") %>%
+  pull(GeneID)
+
+# Only regulated in U2AF1
+genes_U2AF1_c4_only <- U2AF2_U2AF1_c4_df %>%
+  filter(regulate_direction == "only regulated in U2AF1") %>%
+  pull(GeneID)
+
+# Regulated in both
+genes_c4_both <- U2AF2_U2AF1_c4_df %>%
+  filter(regulate_direction == "both regulated") %>%
+  pull(GeneID)
+
+# GO enrichment for U2AF2-only
+ego_U2AF2_c4 <- enrichGO(
+  gene          = genes_U2AF2_c4_only,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENSEMBL",   # or "SYMBOL" depending on your IDs
+  ont           = "ALL",        # Biological Process
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# U2AF1-only
+ego_U2AF1_c4 <- enrichGO(
+  gene          = genes_U2AF1_c4_only,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENSEMBL",
+  ont           = "ALL",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+# Both regulated
+ego_c4_both <- enrichGO(
+  gene          = genes_c4_both,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENSEMBL",
+  ont           = "ALL",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+dotplot(ego_U2AF1_c4, showCategory = 15, title = "GO BP - Only U2AF1 regulated")
+dotplot(ego_U2AF2_c4, showCategory = 15, title = "GO BP - Only U2AF2 regulated")
+dotplot(ego_c4_both, showCategory = 15, title = "GO BP - Both regulated")
+```
+
+
+# Regulatory genes and correlation 
+* Label splicing factors acquired from paper to each dataset in the list
+```{r echo = TRUE, include=FALSE}
+# use map2() for 2 input: select needed column and rename it, and filter only regulated genes (regulated = TRUE)
+merge_res_list = map2(res_list, names(res_list), function(x, name){
+  x %>%
+    dplyr::select(c("GeneID", "regulated", "up_down"))
+})
+
+# Label splicing factors for each df in the list
+merge_res_list = lapply(merge_res_list, function(df){
+  df$splicing_SYMBOL = as_anno$splice_SYMBOL[match(df$GeneID, as_anno$splice_ENSEMBL)]
+return(df)
+})
+
+# From a list, filter only genes are regulated (regulated = TRUE) and convert into df
+regulate_df = purrr::map(res_list, function(x) {
+  x %>%
+  filter(regulated == TRUE & baseMean > 5) %>%
+    dplyr::select(c("log2FoldChange", "GeneID", "regulated", "up_down", "padj"))
+}) %>%
+  purrr::keep(~ inherits(.x, "data.frame"))
+
+saveRDS(regulate_df, file = "/Users/tinkienoob/Master_thesis/HepG2_DESeq_analysis/regulated_df.RData")
+
+# Count the number of values in each data set
+sapply(regulate_df, nrow)
+
+# Count all number of duplicate values
+#sapply(regulate_df, function(x) sum(duplicated(x$GeneID)))
+
+# Merge 3 datasets into 1df
+merge_regulate_df = Reduce(function(x, y) inner_join(x, y, by = "GeneID"), list(
+  regulate_df$U2AF1 %>% rename_with(~paste0(.x, "_U2AF1"), -GeneID),
+  regulate_df$U2AF2 %>% rename_with(~paste0(.x, "_U2AF2"), -GeneID), 
+  regulate_df$SF1 %>% rename_with(~paste0(.x, "_SF1"), -GeneID)))
+
+rownames(merge_regulate_df) = merge_regulate_df$GeneID 
+
+# The package require a name list as input, therefore, GeneID is selected as vector for venn diagram performance
+regulate_gene_list = map(regulate_df, function(x) dplyr::select(x, "GeneID") %>% pull())
+```
+
+* Using UpsetR package for upset plot to see the overlapping and unique genes upon 3 KDs
+```{r include = FALSE}
+regulate_gene_list2 = fromList(regulate_gene_list)
+
+UpSetR::upset(
+    regulate_gene_list2,
+    order.by = "freq",
+    main.bar.color = "steelblue",
+    sets.bar.color = "lightblue",
+    text.scale = 1.3
+  )
+```
+
+## Venn diagram of regulated genes among 3KDs
+```{r}
+# venn diagramm without size proportion to number of values
+plot(eulerr::euler(regulate_gene_list),
+       fills = list(fill = c("#BD241EFF", "#F5B355", "cornflowerblue"), alpha = 0.5),
+       quantities = TRUE,
+       stroke_size = 1, # control border size
+       set_name_size = 1, # set name size
+       text_size = 2)
+
+ggvenn(
+  c(regulate_gene_list, splice_genes = list(as_anno_genes)),
+  fill_color = c("#BD241EFF", "#F5B355", "cornflowerblue", "lightgreen"),
+  stroke_size = 0.5,
+  set_name_size = 4.5,
+  text_size = 4,
+  show_percentage = FALSE
+)
+```
+Among 3 KD datasets where GOIs are knockout to determine their roles in splicing regulation, there are common genes that are still involving in regulating gene expression. 
+Why U2AF2 KD cause other regulating genes not change, meanwhile, U2AF2 genes still upregulats in other knockout samples. => U2AF2 is still expressing?
+
+### Scatter plot (LFC) between 2 datasets 
+Scatter plot of LFC is used to compare the relationship between 2 variables, here is different datasets upon KD of U2AF1, U2AF2, and SF1 genes. If correlation value (R value) is smaller than roughly 0.6, it means that 2 datasets have poor relation. In other words, genes in each dataset regulate in different direction.
+
+The pairwise correlation of log2 fold changes (or expression changes) between datasets is used to assess how similarly two knockdowns affect gene expression. 
+High positive R correlation means that genes tend to be regulated in the same direction in both KDs (e.g., both up or both down). On the other hand, low or negative R showing inconsistent or even opposite in direction in gene expression between KDs.
+
+Create a function 
+```{r include = FALSE}
+# Create a function
+log2FC_compare = function(d1, d2, var1, var2) { 
+
+  # Merge 2 datasets in to 1 df
+  d1_d2_df = inner_join(d1, d2, by = "GeneID", suffix = c(var1, var2))
+  
+  #add SYMBOL/ gene name column
+  d1_d2_df$splice_SYMBOL = as_anno$splice_SYMBOL[match(d1_d2_df$GeneID, as_anno$splice_ENSEMBL)]
+  
+  # Add regulated column if a gene regulated either in only 1 dataset or both
+  d1_d2_df = d1_d2_df %>% mutate(
+    regulate_direction = case_when(
+        .[[paste0("up_down", var1)]] == "up"   & .[[paste0("up_down", var2)]] == "up"   ~ "both up",
+        .[[paste0("up_down", var1)]] == "up"   & .[[paste0("up_down", var2)]] == "down" ~ paste("up", var1, "and down", var2),
+        .[[paste0("up_down", var1)]] == "down" & .[[paste0("up_down", var2)]] == "up"   ~ paste("up", var2, "and down", var1),
+        .[[paste0("up_down", var1)]] == "down" & .[[paste0("up_down", var2)]] == "down" ~ "both down",
+        TRUE ~ NA_character_), # If genes are nonregulated, assign it as NA
+    GOI = case_when(
+      grepl("U2AF2", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("U2AF1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SF1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SRSF3", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SRSF1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SRSF7", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SRRM2", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SON1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("RNPS1", splice_SYMBOL) ~ splice_SYMBOL,
+      TRUE ~ NA)) # Assign all GOI related to splicing using grepl()
+  
+  # Arrange regulate = FALSE first so they will be plotted first => points will be backwards and remove NA 
+  d1_d2_df = d1_d2_df %>%
+  arrange(!is.na(regulate_direction))
+
+return(d1_d2_df)
+}
+```
+
+:::panel-tabset
+
+### U2AF2 and SF1
+```{r}
+# apply function on each pair of comparison
+U2AF2_SF1_df = log2FC_compare(regulate_df$U2AF2, regulate_df$SF1, "U2AF2", "SF1")
+
+ggplot(
+  U2AF2_SF1_df,
+  aes(x = log2FoldChangeU2AF2, 
+      y = log2FoldChangeSF1, 
+      label = splice_SYMBOL, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_SF1_df, !is.na(splice_SYMBOL)),
+             color = "black", stroke = 1, size = 2, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both up" = "#009E73", 
+               "both down" = "#0E54B6FF", 
+               "up U2AF2 and down SF1" = "#BD241EFF",
+               "up SF1 and down U2AF2" = "#F5B355"),
+    na.value = "grey80") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(
+    data = subset(U2AF2_SF1_df, !is.na(splice_SYMBOL)),
+    aes(label = splice_SYMBOL, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 80,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.7,      # pull labels toward points
+    show.legend = FALSE,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(aes(group =1), method = "pearson") +
+  labs(
+    x = "log2FC (shRNA U2AF2)",
+    y = "log2FC (shRNA SF1)",
+    title = "LFC Scatter plot of reg genes between U2AF2 and SF1") +
+  theme_bw()
+```
+
+### U2AF2 and U2AF1
+```{r}
+# apply function on each pair of comparison
+U2AF2_U2AF1_df = log2FC_compare(regulate_df$U2AF2, regulate_df$U2AF1, "U2AF2", "U2AF1")
+
+ggplot(
+  U2AF2_U2AF1_df,
+  aes(x = log2FoldChangeU2AF2, 
+      y = log2FoldChangeU2AF1, 
+      label = splice_SYMBOL, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_U2AF1_df, !is.na(splice_SYMBOL)),
+             color = "black", stroke = 1, size = 2, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both up" = "#009E73", 
+               "both down" = "#0E54B6FF", 
+               "up U2AF2 and down U2AF1" = "#BD241EFF",
+               "up U2AF1 and down U2AF2" = "#F5B355"),
+    na.value = "grey80") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(
+    data = subset(U2AF2_U2AF1_df, !is.na(splice_SYMBOL)),
+    aes(label = splice_SYMBOL, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 70,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.5,      # pull labels toward points
+    show.legend = FALSE,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(aes(group =1), method = "pearson") +
+  labs(
+    x = "log2FC (shRNA U2AF2)",
+    y = "log2FC (shRNA U2AF1)",
+    title = "LFC Scatter plot of reg genes between U2AF2 and U2AF1") +
+  theme_bw()
+```
+
+### U2AF1 and SF1
+```{r}
+SF1_U2AF1_df = log2FC_compare(regulate_df$SF1, regulate_df$U2AF1, "SF1", "U2AF1")
+
+ggplot(
+  SF1_U2AF1_df,
+  aes(x = log2FoldChangeSF1, 
+      y = log2FoldChangeU2AF1, 
+      label = splice_SYMBOL, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(SF1_U2AF1_df, !is.na(splice_SYMBOL)),
+             color = "black", stroke = 1, size = 2, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both up" = "#009E73", 
+               "both down" = "#0E54B6FF", 
+               "up SF1 and down U2AF1" = "#BD241EFF",
+               "up U2AF1 and down SF1" = "#F5B355"),
+    na.value = "grey80") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(
+    data = subset(SF1_U2AF1_df, !is.na(splice_SYMBOL)),
+    aes(label = splice_SYMBOL, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 50,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.5,      # pull labels toward points
+    show.legend = FALSE,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(aes(group =1), method = "pearson") +
+  labs(
+    x = "log2FC (shRNA SF1)",
+    y = "log2FC (shRNA U2AF1)",
+    title = "LFC Scatter plot of reg genes between SF1 and U2AF1") +
+  theme_bw()
+```
+
+:::
+
+As above argument, U2AF2 is a central scaffolding protein in early spliceosome assembly, directly interacting with both:
+U2AF1 (binds 3' splice site AG),
+SF1 (binds the branch point).
+Therefore, knocking down U2AF2 disrupts interactions with both U2AF1 and SF1 and affects many shared downstream effects as U2AF1 and SF1 KDs.
+Otherwise, U2AF1 and SF1 probably regulate largely distinct or even opposite regulatory effects on transcripts or splicing. In other words, a gene that are upregulated in U2AF1 KD performing downregulation in SF1 KD and vice versa. 
+
+
+# Scatter plot comparing all genes upon 2 datasets
+Create a function to compare
+```{r}
+res_list_bM5 = purrr::map(res_list, function(x) {filter(x, baseMean > 5)})
+                          
+# Create a function
+log2FC_compare = function(d1, d2, var1, var2) { 
+
+  # Merge 2 datasets in to 1 df
+  d1_d2_df = left_join(d1, d2, by = "GeneID", suffix = c(var1, var2))
+  
+  #add SYMBOL/ gene name column
+  d1_d2_df$SYMBOL = as_anno$splice_SYMBOL[match(d1_d2_df$GeneID, as_anno$splice_ENSEMBL)]
+  
+  # Add regulated column if a gene regulated either in only 1 dataset or both
+  d1_d2_df = d1_d2_df %>% mutate(
+    regulate_direction = case_when(
+      .[[paste0("regulated", var1)]] & .[[paste0("regulated", var2)]] == TRUE ~ "both",
+      .[[paste0("regulated", var1)]] & !.[[paste0("regulated", var2)]] == TRUE ~ paste("only",var1),
+      !.[[paste0("regulated", var1)]] & .[[paste0("regulated", var2)]] == TRUE ~ paste("only",var2),
+      TRUE ~ NA), # If genes are nonregulated, assign it as NA
+    GOI = case_when(
+      grepl("U2AF2", SYMBOL) ~ SYMBOL,
+      grepl("U2AF1", SYMBOL) ~ SYMBOL,
+      grepl("SF1", SYMBOL) ~ SYMBOL,
+      grepl("SRSF3", SYMBOL) ~ SYMBOL,
+      grepl("SRSF1", SYMBOL) ~ SYMBOL,
+      grepl("SRSF7", SYMBOL) ~ SYMBOL,
+      grepl("SRRM2", SYMBOL) ~ SYMBOL,
+      grepl("SON1", SYMBOL) ~ SYMBOL,
+      grepl("RNPS1", SYMBOL) ~ SYMBOL,
+      TRUE ~ NA)) # Assign all GOI related to splicing using grepl()
+  
+  # Arrange regulate = FALSE first so they will be plotted first => points will be backwards and remove NA 
+  d1_d2_df = d1_d2_df %>%
+  arrange(!is.na(regulate_direction))
+
+return(d1_d2_df)
+}
+```
+At the end, there should be 4 lines with correlation values among 4 different groups (genes regulate in both dataset, or only 1 of them, or none of them - nonregulated). 
+
+::: panel-tabset
+
+### U2AF2 vs. U2AF1
+```{r}
+# apply function on 2 datasets
+U2AF2_compare_U2AF1 = log2FC_compare(res_list_bM5$U2AF2, res_list_bM5$U2AF1, ".U2AF2", ".U2AF1")
+
+# LFC scatter plot
+ggplot(
+  U2AF2_compare_U2AF1,
+  aes(x = log2FoldChange.U2AF2, 
+      y = log2FoldChange.U2AF1, 
+      label = GOI, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_compare_U2AF1, !is.na(GOI)),
+             color = "black", stroke = 1, size = 2.5, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both" = "#FFCD22FF", 
+               "only .U2AF2" = "#0E54B6FF", 
+               "only .U2AF1" = "#BD241EFF"), 
+               na.value = "#D7DCE4FF") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(aes(label = GOI, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 80,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.7,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(method = "pearson") + # group all data in a single group
+  labs(
+    x = "log2FC (shRNA U2AF2)",
+    y = "log2FC (shRNA U2AF1)",
+    title = "LFC Scatter plot of all genes in U2AF2 vs. U2AF1 datasets") +
+  theme_bw() 
+
+```
+
+### U2AF2 vs. SF1
+```{r}
+# apply function on 2 datasets
+U2AF2_compare_SF1 = log2FC_compare(res_list_bM5$U2AF2, res_list_bM5$SF1, ".U2AF2", ".SF1")
+
+# LFC scatter plot
+ggplot(
+  U2AF2_compare_SF1,
+  aes(x = log2FoldChange.U2AF2, 
+      y = log2FoldChange.SF1, 
+      label = GOI, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_compare_SF1, !is.na(GOI)),
+             color = "black", stroke = 1, size = 2.5, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both" = "#FFCD22FF", 
+               "only .U2AF2" = "#0E54B6FF", 
+               "only .SF1" = "#BD241EFF"), 
+               na.value = "#D7DCE4FF") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(aes(label = GOI, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 80,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.7,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(method = "pearson") + # group all data in a single group
+  labs(
+    x = "log2FC (shRNA U2AF2)",
+    y = "log2FC (shRNA SF1)",
+    title = "LFC Scatter plot of all genes in U2AF2 vs. SF1 datasets") +
+  theme_bw() 
+
+```
+
+### U2AF1 vs. SF1
+```{r}
+# apply function on 2 datasets
+U2AF1_compare_SF1 = log2FC_compare(res_list_bM5$U2AF1, res_list_bM5$SF1, ".U2AF1", ".SF1")
+
+# LFC scatter plot
+ggplot(
+  U2AF1_compare_SF1,
+  aes(x = log2FoldChange.U2AF1, 
+      y = log2FoldChange.SF1, 
+      label = GOI, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF1_compare_SF1, !is.na(GOI)),
+             color = "black", stroke = 1, size = 2.5, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both" = "#FFCD22FF", 
+               "only .U2AF1" = "#0E54B6FF", 
+               "only .SF1" = "#BD241EFF"), 
+               na.value = "#D7DCE4FF") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(aes(label = GOI, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 80,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.7,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(method = "pearson") + # group all data in a single group
+  labs(
+    x = "log2FC (shRNA U2AF1)",
+    y = "log2FC (shRNA SF1)",
+    title = "LFC Scatter plot of all genes in U2AF1 vs. SF1 datasets") +
+  theme_bw() 
+
+```
+
+:::
+
+```{r eval = FALSE, include=FALSE}
+### Number of regulated genes toward up/down trend
+# based on threshold padj < 0.05 and l2FC # 0
+# Combine into one long data.frame
+up_down_counts = purrr::map(names(regulate_df), function(df) {
+  
+  reg_df = regulate_df[[df]]
+  
+  up_count = reg_df %>%
+    filter(up_down == "up") %>% nrow()
+  
+  down_count = reg_df %>%
+    filter(up_down == "down") %>% nrow()
+  
+  # Create a table
+    tibble(
+    dataset = df,
+    `Upregulated genes` = up_count,
+    `Downregulated genes` = down_count)
+}) %>%
+  bind_rows() 
+
+up_down_counts = up_down_counts %>%
+  tidyr::pivot_longer(
+    cols = -dataset,  # columns to pivot
+    names_to = "regulation",  # new column for variable names (Upregulated/Downregulated)
+    values_to = "count")       # new column for counts
+
+ggplot(
+  up_down_counts,
+       aes(x = dataset, y = count, fill = regulation)) +
+  geom_bar(stat = "identity", position = "stack", width = 0.5) +
+  scale_fill_manual(values = c("Upregulated genes" = "steelblue", 
+                               "Downregulated genes" = "lightblue")) +
+  geom_shadowtext(
+    aes(label = count),
+    position = position_stack(), # Specifies how text labels should be positioned in relation to each other and the bars.
+    vjust = 0.5,
+    hjust = 3,
+    color = "white",
+    bg.color = "black",
+    size = 4.5) + 
+  theme_light() + 
+  coord_flip() + 
+  labs(title = "Number of up and downregulated genes per KD") +
+  theme(axis.text.y.left = element_text(angle = 90, face = "bold", size = 12))
+```
+
+## GO enrichment analysis of unique and overlapping regulated genes among 3 Kds
+gProfiler2 (version 0.2.3)
+
+### Intersecting genes among 3 KDs
+```{r}
+# Collect geneIds intersecting among 3 data sets
+intersect_genes = Reduce(intersect, list(regulate_gene_list$U2AF1,
+                                         regulate_gene_list$U2AF2,
+                                         regulate_gene_list$SF1))
+
+# Count number of overlapping genes 
+print(paste("Number of overlapping genes among 3 KDs:", length(unique(intersect_genes)), "genes"))
+
+# Extract up/ downregulate genes among intersecting list
+intersecting_regulate_df = merge_regulate_df[merge_regulate_df$GeneID %in% intersect_genes, ]
+
+intersecting_regulate_df = dplyr::select(intersecting_regulate_df, c(GeneID, up_down_U2AF1, up_down_U2AF2, up_down_SF1)) 
+
+intersecting_regulate_df = left_join(intersecting_regulate_df, gene_anno, by = c("GeneID" = "ENSEMBL"))
+
+# GO enrich
+ego_intersecting_res = enrichGO(gene = intersect_genes,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",           # or "MF", "CC"
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05)
+
+# Dotplot of GO result
+dotplot(ego_intersecting_res, 
+        showCategory = 20,
+        font.size = 7) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of Intersecting Genes among 3 KDs")
+
+# Filter by splicing-related GO terms by grep() multiple
+#ego_intersecting_genes = ego_intersecting_res@result[grepl("segregation|chromosome|cell cycle|chromatid", ego_intersecting_res@result$Description, ignore.case = TRUE), ]
+  
+# Combine all geneIDs from selected splicing GO terms by
+## unlist then split all geneID after "/"
+#ego_intersecting_geneids = unique(unlist(strsplit(ego_intersecting_genes$geneID, "/")))
+```
+
+Extract all genes overlapping between 2 datasets function
+```{r}
+################################### Extract all genes overlapping between d1 and d2 datasets but not involved in d3
+intersecting_d1_d2 <- function(d1, d2, d3) {
+  # Extract gene lists
+  genes_d1 <- regulate_gene_list[[d1]]
+  genes_d2 <- regulate_gene_list[[d2]]
+  genes_d3 <- regulate_gene_list[[d3]]
+  
+  # Overlap d1 and d2
+  all_intersect_d1_d2 <- intersect(genes_d1, genes_d2)
+  
+  # Remove genes also found in d3
+  intersect_d1_d2 <- setdiff(all_intersect_d1_d2, genes_d3)
+  
+  return(list(
+    intersect_genes = intersect_d1_d2,
+    intersect_number = length(unique(intersect_d1_d2))
+  ))
+}
+
+intersecting_U2AF2_SF1 = intersecting_d1_d2("U2AF2", "SF1", "U2AF1")
+U2AF2_intersect_SF1_res = res_list$U2AF2[res_list$U2AF2$GeneID %in% intersecting_U2AF2_SF1$intersect_genes, ]
+SF1_intersect_U2AF2_res = res_list$SF1[res_list$SF1$GeneID %in% intersecting_U2AF2_SF1$intersect_genes, ]
+```
+
+## Unique genes in U2AF2, U2AF1 or SF1
+```{r}
+## setdiff is used to  genes that are in U2AF2 but absent from both U2AF1 and SF1
+## union combines the unique GeneIDs from both datasets U2AF1 and SF1
+uniq_U2AF2 = regulate_gene_list$U2AF2[regulate_gene_list$U2AF2 %in% 
+                                        setdiff(regulate_gene_list$U2AF2, 
+                                                union(regulate_gene_list$U2AF1, regulate_gene_list$SF1))]
+n_distinct(uniq_U2AF2)
+uniq_U2AF2_df = res_U2AF2.df[res_U2AF2.df$GeneID %in% uniq_U2AF2,]
+
+## setdiff is used to  genes that are in U2AF1 but absent from both U2AF2 and SF1
+## union combines the unique GeneIDs from both datasets U2AF2 and SF1
+uniq_U2AF1 = regulate_gene_list$U2AF1[regulate_gene_list$U2AF1 %in% 
+                                        setdiff(regulate_gene_list$U2AF1, 
+                                                union(regulate_gene_list$U2AF2, regulate_gene_list$SF1))]
+n_distinct(uniq_U2AF1)
+
+## setdiff is used to  genes that are in SF1 but absent from both U2AF1 and U2AF2
+## union combines the unique GeneIDs from both datasets U2AF1 and U2AF2
+uniq_SF1 = regulate_gene_list$SF1[regulate_gene_list$SF1 %in% 
+                                        setdiff(regulate_gene_list$SF1, 
+                                                union(regulate_gene_list$U2AF1, regulate_gene_list$U2AF2))]
+n_distinct(uniq_SF1)
+```
+
+### GO enrichment of unique regulated genes
+
+::: panel-tabset
+
+### U2AF2 dataset
+https://biit.cs.ut.ee/gplink/l/avHqC_JRaSe
+```{r}
+# GO enrich
+ego_unique_U2AF2 = enrichGO(gene = uniq_U2AF2,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",           # or "MF", "CC"
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = T)
+
+# Dotplot of GO result
+dotplot(ego_unique_U2AF2, showCategory = 15) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of Unique Genes regulated in U2AF2 dataset")
+
+# Extract splicing-related genes in upregulated overlapping genes 
+ego_unique_U2AF2_splicing = ego_unique_U2AF2@result %>%
+  filter(grepl("splicing", Description, ignore.case = TRUE))
+
+ego_unique_U2AF2_splicing_terms = unique(unlist(strsplit(ego_unique_U2AF2_splicing$geneID, "/")))
+
+# https://biit.cs.ut.ee/gplink/l/a9zpCCWX-So
+gprofiler_unique_U2AF2 = gost(query = ego_unique_U2AF2_splicing_terms, # input geneIDs 
+                organism = "hsapiens", # organism of interest 
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated",
+                as_short_link = TRUE) # domain scope
+```
+U2AF2 is more central in early spliceosome assembly compared to U2AF1 and SF1 which binds polypyrimidine tracts and interacts with many early splicing factors, possibly affecting splicing of other splicing regulators. Therefore, depletion of U2AF2 potentially impact on splicing regulation of other SFs and also genome stability that requires repair process (ds break repair or recombinational repair)
+
+```{r}
+genes_k6_c2_expression = ego_genes_k6_c2@result %>%
+  filter(grepl("expression|transcription|splicing", Description, ignore.case = TRUE))
+
+genes_k6_c2_expression_terms = unique(unlist(strsplit(genes_k6_c2_expression$geneID, "/")))
+
+genes_k6_c2_expression_df = res_U2AF2.df[res_U2AF2.df$SYMBOL %in% genes_k6_c2_expression_terms,]
+
+compare_SF_express_U2AF2 = list(
+  "Unique regSFs U2AF2" = uniq_U2AF2, 
+  "Expression genes row2" = genes_k6_c2_expression_df$GeneID)
+
+plot(eulerr::euler(compare_SF_express_U2AF2),
+       fills = list(fill = c("#F5B355", "#BD241EFF"), alpha = 0.5),
+       quantities = TRUE,
+       stroke_size = 1, # control border size
+       set_name_size = 1, # set name size
+       text_size = 2)
+
+compare_SF_express_U2AF2_gene = intersect(uniq_U2AF2, genes_k6_c2_expression_df$GeneID)
+compare_SF_express_U2AF2_gene = res_U2AF2.df[res_U2AF2.df$GeneID %in% compare_SF_express_U2AF2_gene,]
+
+```
+
+
+```{r}
+cor_unique_U2AF2_splicing_expr = correlation_anno[correlation_anno$so %in% compare_SF_express_U2AF2_gene,] %>%
+  arrange(source_class, target_class)
+
+#cor_SF_k6_c2 = cor_SF_k6_c2[cor_SF_k6_c2$tg %in% transesterification_genes,] 
+
+cor_unique_U2AF2_splicing_expr
+#a= unique(cor_unique_U2AF2_splicing_expr$source_class)
+```
+
+https://www.ebi.ac.uk/QuickGO/term/GO:0000375: If downregulated genes are enriched for the GO term “RNA splicing via transesterification reactions”, it suggests:
+
+Not just any splicing-related genes are affected,
+But genes directly involved in the core catalysis of intron removal are repressed.
+That’s more severe than just changes in regulation or auxiliary splicing roles — it could impair global splicing fidelity, mRNA processing, and lead to widespread transcript instability.
+
+```{r}
+#cor2_SF_cluster2_k6 = correlation_anno %>%
+#  filter(tg %in% unique(cor_SF_cluster2_k6$so) | 
+#        tg %in% unique(cor_SF_cluster2_k6$tg) |
+#        so %in% unique(cor_SF_cluster2_k6$tg) |
+#        so %in% unique(cor_SF_cluster2_k6$tg))
+
+#cor_SF_cluster2_k6 = bind_rows(cor_SF_cluster2_k6, cor2_SF_cluster2_k6) %>%
+#  distinct(edges, .keep_all = TRUE)
+
+cor_unique_U2AF2_splicing_expr_mat = cor_unique_U2AF2_splicing_expr %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_unique_U2AF2_splicing_expr_mat, 
+         method = "square", 
+         is.corr = FALSE, 
+         cl.lim = c(0,1), 
+         sig.level = 0.05,
+         rect.lwd = 3,  
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+### U2AF1 dataset
+https://biit.cs.ut.ee/gplink/l/ahYEVuhIjQ-
+```{r}
+# GO enrich
+GO_unique_U2AF1 = enrichGO(gene = uniq_U2AF1,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "ALL",           # or "MF", "CC"
+                pAdjustMethod = "BH",
+             #   pvalueCutoff = 1,
+                readable = TRUE)
+
+# Dotplot of GO result
+dotplot(GO_unique_U2AF1, showCategory = 15) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of Unique Genes regulated in U2AF1 dataset")
+
+# https://biit.cs.ut.ee/gplink/l/aXP3MWaJRRC
+gprofiler_unique_U2AF1 = gost(query = uniq_U2AF1, # input geneIDs 
+                organism = "hsapiens", # organism of interest
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated",
+                as_short_link = TRUE) # domain scope
+```
+
+### SF1 dataset
+https://biit.cs.ut.ee/gplink/l/ahYEVuhIjQ-
+```{r}
+# GO enrich
+GO_unique_SF1 = enrichGO(gene = uniq_SF1,
+                OrgDb = org.Hs.eg.db,
+                keyType = "ENSEMBL",
+                ont = "BP",          
+                pAdjustMethod = "BH",
+                readable = TRUE)
+
+# Dotplot of GO result
+dotplot(GO_unique_SF1, showCategory = 15) +
+  theme_bw() + 
+  ggtitle("GO Enrichment of Unique Genes regulated in SF1 dataset")
+
+# https://biit.cs.ut.ee/gplink/l/aTB_FnV-iTc
+gprofiler_unique_U2AF1 = gost(query = uniq_SF1, # input geneIDs 
+                organism = "hsapiens", # organism of interest
+                significant = TRUE, # return only the significant result
+                exclude_iea = FALSE,  # do not exclude GO electronic annotation
+                evcodes = TRUE, # include evidence code
+                user_threshold = 0.05, # P-value threshold (eg. P value<= 0.05)
+                correction_method = "g_SCS",  # Multiple testing correction method
+                domain_scope = "annotated",
+                as_short_link = TRUE) # domain scope
+```
+
+:::
+
+U2AF1 and SF1 may affect fewer differential expression genes uniquely compared to U2AF2.
+
+# Functional splice factor analysis
+Aim: Understanding the functional link between splice factors identified to be differentially regulated.
+Steps:
+1. Make a heatmap with SFs, from the Rogaslka et al., 2024, using their gene expression values after perturbation of U2AF2, U2AF1, and SF1 individually.
+2.	Note. Please do step 1 with different k-means clustering values to identify clusters revealing the underlying patterns. Such as SFs regulated in all, or only under specific conditions such as U2AF2 & U2AF1, U2AF1 & SF1, U2AF2 unique etc. 
+3.	The supplement table 1 includes the categories the SFs belong to. It would be interesting to label that in the heatmap. So we know whether the SFs from certain groups are clustered together. 
+
+## Sankey diagram
+To overview regulation trend of 305 SFs across different perturbations
+```{r}
+SF_sankey_df = purrr::imap(res_list, function(res, condition) {
+  
+  res_sf = res[res$GeneID %in% as_anno_genes, ]
+  
+  res_sf %>%
+    dplyr::select(GeneID, up_down) %>%
+    mutate(Condition = condition) %>%
+    rename(Regulation = up_down)
+}) %>% bind_rows()
+
+# Convert to wide format
+SF_sankey_df = SF_sankey_df %>%
+  pivot_wider(names_from = Condition, values_from = Regulation)
+
+# 1. Aggregate combinations by frequency
+sankey_df_count = SF_sankey_df %>%
+  group_by(U2AF2, U2AF1, SF1) %>%
+  summarise(Freq = n(), .groups = "drop") %>%
+  mutate(U2AF2 = factor(U2AF2, levels = c("up","not regulated", "down")))
+
+# 2. Plot Sankey
+ggplot(sankey_df_count,
+       aes(axis1 = U2AF2, axis2 = U2AF1, axis3 = SF1, y = Freq)) +
+  geom_alluvium(aes(fill = U2AF2), width = 1/4, alpha = 0.65) +
+  geom_stratum(width = 1/4, color = "black", alpha = 0.1) +
+  # Text for strata
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(stratum)), 
+            size = 3.5, fontface = "bold") +  
+  # Text for total numbers of genes in each stratum
+  geom_text(stat = "stratum", 
+            aes(label = after_stat(count)), 
+            nudge_y = 10, 
+            size = 3.5, 
+            check_overlap = TRUE) + 
+  scale_x_discrete(limits = c("U2AF2", "U2AF1", "SF1"), expand = c(0.05, 0.05)) +
+    # Manual fill colors for up/down/not regulated
+  scale_fill_manual(values = c(
+    "up" = "#F5B355",
+    "down" = "#BD241EFF",
+    "not regulated" = "#4D6291")) +
+  labs(y = "Number of Genes",
+       title = "Regulatory patterns of SF genes across SF perturbations") +
+  theme_alluvial(base_size = 12) +
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(face = "bold", size = 12))
+```
+
+## Heatmap DEGs of 305 SFs
+*Create a rowAnnotation
+extract splicing genes according to as_anno (imported) file
+```{r}
+matrix_nozero1 = matrix_nozero[rownames(matrix_nozero) %in% as_anno_genes,]
+rownames(matrix_nozero1) = setNames(as_anno$splice_SYMBOL, as_anno$splice_ENSEMBL)[rownames(matrix_nozero1)]
+  
+SFcluster_list = list()
+
+for (k in 4:12){
+  ########################## Row clustering (genes)
+  set.seed(123)
+  # Try different kmean to see which kmean gives best cluster
+  row_cluster = kmeans(matrix_nozero1, centers = k, nstart = 25)
+  # assign result of kmeans to cluster list kk
+  SFcluster_list[[paste0("k", k)]] = row_cluster
+  # order of cluster labels
+  row_sort = order(row_cluster$cluster)
+
+  # Create matrix following row order
+  splice_mat = matrix_nozero1[row_sort, ]
+
+  ########################## get row split match with row in matrix
+  row_split = row_cluster$cluster[row_sort]
+  row_split = row_split[rownames(splice_mat)]
+
+  ########################## Build row annotation using merged class
+  ha_row = rowAnnotation(
+    Class = class_df$merged_class[match(rownames(splice_mat), class_df$gene)],
+    width = unit(25, "mm"),
+    col = class_colors,
+    show_legend = TRUE,
+    annotation_name_gp = gpar(fontsize = 10, fontface = "bold", col = "darkred"))
+  
+  ########################## Create mark annotation for GOI
+  # Add GOI column that contains U2, SR, SF in the name of genes
+  SF_anno = mutate(as_anno, GOI = case_when(
+      grepl("U2AF2", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("U2AF1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SF1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SRSF", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("RBM10", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SRRM2", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("SON1", splice_SYMBOL) ~ splice_SYMBOL,
+      grepl("RNPS1", splice_SYMBOL) ~ splice_SYMBOL,
+      TRUE ~ NA)) # Assign all GOI related to splicing using grepl()
+
+  # filter genes that is not within GOI
+  SF_anno_GOI = SF_anno[!is.na(SF_anno$GOI), ]
+
+  # match rownames of dds matrix to ensembl of my.genes df for annotation
+  SF_index = match(SF_anno_GOI$splice_SYMBOL, rownames(splice_mat))
+  # remove NA value row
+  SF_index = SF_index[!is.na(SF_index)]
+
+  # label with only GOI (splicing-involved genes)
+  label = SF_anno_GOI$GOI
+
+  hm_SFanno = rowAnnotation(foo = anno_mark(at = SF_index,
+                                        labels = label,
+                                        labels_gp = gpar(fontsize = 4,
+                                                         font = 6), padding = unit(0.3, "mm")))
+  
+    ######################### 1. l2FC annotations for each knockdown condition 
+  SF_l2FC = purrr::imap(res_list, function(res, condition) {
+  
+    res_sf = res[res$GeneID %in% as_anno_genes, ]
+  
+    res_sf %>%
+      dplyr::select(SYMBOL, log2FoldChange) %>%
+      mutate(Condition = condition) %>%
+      na.omit()
+}) 
+  
+  # Build l2fc matrix for all 3 knockdowns
+l2fc_mat = data.frame(
+  l2FC_SF1   = SF_l2FC$SF1$log2FoldChange[match(rownames(splice_mat), SF_l2FC$SF1$SYMBOL)],
+  l2FC_U2AF1 = SF_l2FC$U2AF1$log2FoldChange[match(rownames(splice_mat), SF_l2FC$U2AF1$SYMBOL)],
+  l2FC_U2AF2 = SF_l2FC$U2AF2$log2FoldChange[match(rownames(splice_mat), SF_l2FC$U2AF2$SYMBOL)])
+
+rownames(l2fc_mat) = rownames(splice_mat)
+
+l2fc_col_fun = colorRamp2(c(-1, 0, 1), c("#009E73", "white", "darkorange"))
+
+# Use one rowAnnotation for all 3 l2FCs
+l2fc_anno = rowAnnotation(
+  df = l2fc_mat,
+  col = list(
+    l2FC_SF1   = l2fc_col_fun,
+    l2FC_U2AF1 = l2fc_col_fun,
+    l2FC_U2AF2 = l2fc_col_fun),
+  annotation_name_gp = gpar(fontsize = 8, fontface = "bold"),
+  width = unit(25, "mm"))
+
+  ht1 = ComplexHeatmap::Heatmap(splice_mat,
+      cluster_columns = FALSE, 
+      cluster_rows = TRUE,
+      use_raster = TRUE,
+      show_row_names = FALSE,
+      row_names_gp = grid::gpar(fontsize = 5),
+      col = colorRamp2(c(-1, 0, 1), c("#0E54B6FF", "white", "#BD241EFF")),
+      column_title = paste("SF differential expression (k =",k,")"),
+      column_title_gp = gpar(fontsize = 15, col = "darkred", fontface = "bold"),
+      name = "z-score",
+      row_split = row_split,
+      border = TRUE,
+      column_names_gp = grid::gpar(fontsize=8, col = "darkred", fontface = "bold"),
+      heatmap_width = unit(10, "cm"),
+      right_annotation = c(l2fc_anno, hm_SFanno))
+  
+  print(ht1)}
+
+#draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+```
+
+Splicing-involved and all genes in specific cluster
+```{r}
+
+# Create a function to extract splicing genes from interested cluster in heatmap
+SFgenes_cluster = function(cluster_id){ 
+  
+  # extract all the genes present in interested cluster
+  genes_cluster = names(which(SFcluster_list[["k12"]]$cluster == cluster_id))
+  
+  # identify splicing genes from the extracted genes using geneID/ or ENSEMBL ID
+  SF_genes_cluster = genes_cluster[genes_cluster %in% as_anno$splice_SYMBOL]
+
+return(SF_genes_cluster)
+  }
+```
+
+::: panel-tabset
+
+### kmean = 12, Cluster 11
+```{r}
+# extract all names of genes in cluster 11 of kmean = 12
+SF_k11_cluster11 = SFgenes_cluster(11)
+
+ego_SF_k11_cluster11 = enrichGO(gene = SF_k11_cluster11,
+                OrgDb = org.Hs.eg.db,
+                keyType = "SYMBOL",
+                ont = "BP",
+                pAdjustMethod = "BH",
+                readable = TRUE)
+
+dotplot(ego_SF_k11_cluster11, showCategory = 15, font.size = 7)
+
+cor_SF_k11_cluster11 = correlation_anno[correlation_anno$so %in% SF_k11_cluster11,] %>%
+  arrange(source_class, target_class)
+
+cor_SF_k11_cluster11 = cor_SF_k11_cluster11 %>%
+  filter(tg %in% cor_SF_k11_cluster11$so)
+
+cor_SF_k11_cluster11_mat = cor_SF_k11_cluster11 %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_SF_k11_cluster11_mat, 
+         method = "square", 
+         is.corr = FALSE, 
+         cl.lim = c(0,1),
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+Cluster 3 was selected for correlation analysis between splicing factors because it shows a distinct: a pattern of high expression (red) at U2AF1, mild/neutral at SF1, and strongly downregulated upon U2AF2 knockdown. This suggests potential positive regulation by U2AF2. In contrast, SF1 knockdown appears to have a minimal effect or distinct pattern on the same gene set, indicating that these splicing factors may be specifically regulated by U2AF2, not SF1. This suggests some genes are oppositely regulated by U2AF1 and U2AF2, possibly due to their functional differences.
+
+### kmean = 12, Cluster 6
+```{r}
+SF_k11_cluster6 = SFgenes_cluster(6)
+
+cor_SF_k11_cluster6 = correlation_anno[correlation_anno$so %in% SF_k11_cluster6,] %>%
+  arrange(source_class, target_class)
+
+#cor_SF_k11_cluster6 = cor_SF_k11_cluster6 %>%
+#  filter(tg %in% SF_k11_cluster6)
+
+cor_SF_k11_cluster6_mat = cor_SF_k11_cluster6 %>%
+  dplyr::select(so, tg, cor) %>%
+  pivot_wider(names_from = tg, values_from = cor) %>%
+  column_to_rownames("so") %>%
+  as.matrix()
+
+corrplot(cor_SF_k11_cluster6_mat, 
+         method = "square", 
+         is.corr = FALSE, 
+         cl.lim = c(0,1),
+         col = colorRampPalette(RColorBrewer::brewer.pal(4, "PiYG"))(200), 
+         cl.cex = 0.6,
+         tl.cex = 0.6,
+         tl.col = "black",
+         na.label = " ")
+```
+
+
+# Session info
+```{r}
+sessionInfo()
+```
+

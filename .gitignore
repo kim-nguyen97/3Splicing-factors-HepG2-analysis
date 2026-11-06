@@ -1,0 +1,27 @@
+# Exclude these folders
+/featureCounts/
+/HepG2_count/
+/science.adn8105_tables_s1_to_s9/
+
+# Exclude R data and history
+*.RData
+.RDataTmp*
+*.Rhistory
+.Rapp.history
+
+# Exclude Markdown and R Markdown
+*.md
+*.markdown
+*.rmarkdown
+*.Rmd
+*.rmd
+
+# Exclude Excel files
+*.xlsx
+
+# Exclude environment files
+.env
+.env.*
+
+# Exclude macOS metadata
+.DS_Store

@@ -1,0 +1,772 @@
+---
+title: "Process data for DESeq analysis of U2AF1, U2AF2, SF1"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+author:
+  - name: "Kim Nguyen"
+format:
+  html:
+    code-fold: TRUE
+    code-overflow: scroll
+    code-summary: "Show code"
+    code-tools: true
+    code-line-numbers: true
+    toc: true
+    toc-depth: 5
+    toc-location: right
+    toc-expand: true
+    number-sections: true
+    theme: sandstone
+    fontsize: 11pt
+    linestretch: 1.5
+    fig-format: png
+    cap-location: margin
+    body-width: 900px
+    sidebar-width: 300px
+    page-layout: full
+    crossref:
+      fig-title: Fig
+    embed-resources: true
+    link-external-newwindow: true
+    smooth-scroll: true
+    css: css.css
+    execute:
+      echo: true
+      warning: false
+---
+
+# Introduction
+
+This report processes gene-level RNA-seq count data and performs differential expression analysis using DESeq2. It also evaluates sample quality, explores global expression patterns, and investigates how the choice of control samples affects differential-expression results.
+
+# Setup
+## Load packages
+```{r message = FALSE}
+library(DESeq2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+library(gridExtra)
+library(patchwork)
+library(RColorBrewer)
+library(ggrain)
+library(ggstatsplot)
+library(ggpubr)
+
+library(pheatmap)
+library(readxl)
+```
+
+## Define paths and parameters
+```{r}
+# Output path
+outpath <- "../HepG2_DESeq_analysis/HepG2_count/"
+
+# Input path
+countFolder <- "../HepG2_DESeq_analysis/HepG2_count/count_reverse"
+list.files(countFolder)
+# List all file containing "counts" in the folder
+countFiles = list.files(countFolder, pattern = "htseqcounts")
+```
+## Sample metadata and Experimental conditions
+* Input htseq count 
+data acquired from htseq_count (run by htseq_count on VScode - cluster - address: )
+** Prepare a table containing sample name, its conditions (which knock out), and its replicates
+```{r include =FALSE}
+# Create sample table/ data frame for DESeq from Htseq-count
+## remove suffix in htseq output name
+sampleNames <- sub("_htseqcounts.txt", "", countFiles)
+## define how many conditions and replicates for df
+conditions = factor(rep(c("SF1", "U2AF1", "U2AF2", "Ctrl_U2AF1", "Ctrl_U2AF2_SF1"), each=2))
+replicates = factor(rep(c("rep1", "rep2"),5))
+
+sampleTable <- data.frame(
+  sampleName = sampleNames,
+  file= countFiles,  # actual file names used to read data
+  condition = conditions,
+  replicate = replicates)
+```
+
+# Differential Expression Analysis
+
+## Create the DESeq2 dataset (without matrix)
+
+```{r}
+dds = DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                 directory = countFolder,
+                                 design = ~ condition)
+```
+
+* Running DESeq2 analysis to identify differentially expressed genes
+```{r}
+# Deseq data object 
+dds = DESeq(dds)
+# Save dds outout in the outpath as rds file
+saveRDS(dds, file = paste0(outpath, "dds_DESeq2.dds"))
+```
+
+## Annotate all genes using Ensembl IDs
+There are probably many geneIds having the same gene name or it also could be same geneIds but different versions having the same gene name which create multiple similar geneIds in the gene annotation package. The version of the genes is used to track changes over time due to updates, transcript or feature changes, etc. 
+```{r}
+# calculate dds result (however, it calculate only 1 pair between U2AF2 and its control)
+res = results(dds, alpha = 0.05)
+
+# Convert dds result into dataframe
+res.df = as.data.frame(res)
+
+# Remove version of gene to match with geneIDs symbol in the package
+geneIDs = sub("\\..*", "", rownames(res.df))  # dds from DESeq2 object
+
+# Annotate geneID with geneNames using R human genome package
+gene_anno = AnnotationDbi::select(org.Hs.eg.db,
+                                  keys = geneIDs,
+                                  columns = "SYMBOL",
+                                  keytype = "ENSEMBL") #ENS suffix is derived from Ensembl
+
+# 1 gene name perhaps has different geneID/ same geneID but different versions
+# GeneIDs and gene names are only needed, therefore, no needs to worry about the changes of different versions.
+gene_anno = gene_anno[!duplicated(gene_anno$ENSEMBL), ]
+
+save(gene_anno,
+     file = "../HepG2_DESeq_analysis/gene_anno.RData")
+```
+
+## Check sizeFactor normalizing read counts and Multiple testing correction:
+To reduce false positives when testing thousands of genes simultaneously. In this analysis, Benjamini-Hochberg (false discovery rate) is applied to control for multiple hypothesis testing.
+Also DESeq2 usually applies median-of-ratios normalization (size Factors) internally when modeling counts for differential expression.
+```{r include=FALSE}
+### Information about which variables and tests were used can be found by calling the function mcols on the results object.
+mcols(res)$description
+```
+
+
+One of the first step in the DE analysis workflow is count normalization, which is necessary to make accurate comparisons of gene expression between samples. Normalization is the process to scale raw count values to account for the "uninteresting" factors (usually sequencing depth, gene length, or RNA composition) across samples.
+There are several common normalization methods:
+CPM (counts/ million), TPM (transcripts/ kilobase milion), RPKM/ FPKM (reads-fragments/ kilobase of exon/ milion reads-fragments mapped), DESeq2's median of ratios. 
+(Source: https://hbctraining.github.io/DGE_workshop/lessons/02_DGE_count_normalization.html)
+What is sizeFactor? It represents scaling factors for each sample to normalized raw counts and can be adjusted for easily comparision
+```{r include = FALSE}
+# Inspect the sizeFactor
+dds$sizeFactor
+
+# Get read counts
+#A = DESeq2::counts(dds)
+#rownames(A) = sub("\\..*", "", rownames(A))
+
+#Get normalized read counts of dds result
+dds_count = DESeq2::counts(dds, normalized = TRUE)
+```
+
+## Define KD-control pair comparisons
+```{r}
+# Create a function to apply for each DESeq2 result
+res_function = function(deseq_result){
+  # 1st, convert dds result into df
+  deseq_result.df = as.data.frame(deseq_result)
+  # shrink raw values from dds result by ashr type
+  deseq_result.ashr = lfcShrink(dds = dds,
+                                contrast = contrast,
+                                res = deseq_result,
+                                type = "ashr")
+  # Add GeneID column
+  deseq_result.df$GeneID = geneIDs
+  # convert dds.shrinkage.ashr result into df then also add geneID column
+  deseq_result.ashr = as.data.frame(deseq_result.ashr)
+  deseq_result.ashr$GeneID = geneIDs
+  deseq_result.ashr = dplyr::select(deseq_result.ashr, c("GeneID", "log2FoldChange"))
+  
+  # dds.shrinkage.ashr result then is merged with dds result df using geneID and is added suffix at the end of colnames to differentiate
+  deseq_result.df = inner_join(deseq_result.df, deseq_result.ashr, by = "GeneID", suffix = c("", ".ashr"))
+  
+  # assign gene name for geneID using gene_anno
+  deseq_result.df2 = inner_join(deseq_result.df, gene_anno, by = c("GeneID" = "ENSEMBL"))
+  
+  # Add regulated column
+  # If padj < 0.05, set TRUE (regulated), otherwise, FALSE
+  deseq_result.df2$regulated = deseq_result.df2$padj < 0.05 
+  deseq_result.df2$regulated[is.na(deseq_result.df2$regulated)] = FALSE #If NA, set FALSE
+  
+  deseq_result.df2 = dplyr::mutate(deseq_result.df2, up_down = case_when(
+    regulated & log2FoldChange > 0 ~ "up", 
+    regulated & log2FoldChange < 0 ~ "down", 
+    TRUE ~ "not regulated" #if none of 2 above are the cases, then "not regulated"
+  ))
+  
+  # Specify my GOI
+  deseq_result.df2 = dplyr::mutate(deseq_result.df2, myLabel = case_when(
+    SYMBOL == "U2AF2" ~ SYMBOL,
+    SYMBOL == "U2AF1" ~ SYMBOL,
+    SYMBOL == "SF1" ~ SYMBOL,
+    TRUE ~ NA_character_))
+  
+return(deseq_result.df2)
+}
+```
+
+## log2FoldChange 
+```{r include =FALSE} 
+res_U2AF1 = results(dds, alpha = 0.05, contrast = c("condition", "U2AF1", "Ctrl_U2AF1"))
+res_U2AF2 = results(dds, alpha = 0.05, contrast = c("condition", "U2AF2", "Ctrl_U2AF2_SF1"))
+res_SF1 = results(dds, alpha = 0.05, contrast = c("condition", "SF1", "Ctrl_U2AF2_SF1"))
+res_U2AF2_ctrlAF1 = results(dds, alpha = 0.05, contrast = c("condition", "U2AF2", "Ctrl_U2AF1"))
+res_SF1_ctrlAF1 = results(dds, alpha = 0.05, contrast = c("condition", "SF1", "Ctrl_U2AF1"))
+
+# Apply function created aboved to create data frame for each pair of comparison (between control and sample)
+res_U2AF1.df = res_function(res_U2AF1)
+res_U2AF2.df = res_function(res_U2AF2)
+res_SF1.df = res_function(res_SF1)
+res_U2AF2_ctrlAF1.df = res_function(res_U2AF2_ctrlAF1)
+res_SF1_ctrlAF1.df = res_function(res_SF1_ctrlAF1)
+
+# Sort regulated genes from highest LFC to lowest
+res_U2AF1.df = arrange(res_U2AF1.df, desc(log2FoldChange))
+res_U2AF2.df = arrange(res_U2AF2.df, desc(log2FoldChange))
+res_SF1.df = arrange(res_SF1.df, desc(log2FoldChange))
+res_U2AF2_ctrlAF1.df = arrange(res_U2AF2_ctrlAF1.df, desc(log2FoldChange))
+res_SF1_ctrlAF1.df = arrange(res_SF1_ctrlAF1.df, desc(log2FoldChange))
+
+# save all dds
+save(res_U2AF1.df, res_U2AF2.df, res_SF1.df,
+     file = "../HepG2_DESeq_analysis/all_results_df_DESeq2.RData")
+```
+
+# Exploratory Data Analysis and Quality Assessment
+## P value and P-adj distribution
+Most of p-values distribute between 0 and 1, and a peak of small p-values on the left side, which indicate a uniform background and are not significant. In other words, majority of genes usually has non-differentially expressend genes giving a rough indication of false discovery rate (FDR). That is why p-value is adjusted/ corrected for false discovery rate. False positives (with high p-value) are reduced after multiple testing.
+Source: https://www.huber.embl.de/msmb/08-chap.html 
+The highest bar  after adjustment is the most significant, others are insignificant. P-adj value is more common to use. In this analysis, we could tell most of counts having padj < 0.05, threshhold is set: padj < 0.05.
+```{r include = FALSE}
+# Create a function for histogram plot
+histogram_plot = function(deseq_result.df){ 
+  hist1 = ggplot(deseq_result.df, aes(x = pvalue)) +
+    geom_histogram(fill = "cornflowerblue", color = "black") + 
+    ggtitle("P-value distribution") +
+    theme_linedraw()
+  
+  hist2 = ggplot(deseq_result.df, aes(x = padj)) + 
+    geom_histogram(fill = "lightpink", color = "black") +
+    ggtitle("Adjusted P-value distribution") +
+    theme_linedraw()
+  
+return(list(p.hist = hist1, padj.hist = hist2))}
+```
+
+::: {.panel-tabset .nav-pills}
+
+### U2AF1
+```{r}
+hist_U2AF1 = histogram_plot(deseq_result.df = res_U2AF1.df)
+grid.arrange(hist_U2AF1$p.hist, hist_U2AF1$padj.hist, ncol =2)
+```
+### U2AF2
+```{r}
+hist_U2AF2 = histogram_plot(deseq_result.df = res_U2AF2.df)
+grid.arrange(hist_U2AF2$p.hist, hist_U2AF2$padj.hist, ncol =2)
+```
+### SF1
+```{r}
+hist_SF1 = histogram_plot(res_SF1.df)
+grid.arrange(hist_SF1$p.hist, hist_SF1$padj.hist, ncol = 2)
+```
+::: 
+
+## Hierarchical Clustering Heatmap/ Sample distance heatmap
+This heatmap shows how different between all samples for evaluating strong patterns between conditions and potential outliers based on normalized gene expression values which is complementary to PCA. Clustered samples, hence, are expected to be similar to PCA plot observation.
+
+* Log-transformed data to stabilize variance and
+blind = F to not ignore differences in conditions and biological variation.
+```{r}
+# Perform rlog transformation
+rld = rlog(dds, blind = F) 
+
+# Compute pairwise distances between samples
+sampleDist = dist(t(assay(rld)))
+sampleMatrix = as.matrix(sampleDist)
+
+# Make a color gradient palette for heatmap
+color = colorRampPalette(rev(brewer.pal(9, "Reds")))(255)
+
+# Create heatmap using pheatmap (simple)
+pheatmap(sampleMatrix, 
+         col = color, 
+         clustering_distance_rows = sampleDist, 
+         clustering_distance_cols = sampleDist,
+         cellwidth = 30, 
+         cellheight = 15,
+         main = "Heatmap describes distance between samples")
+```
+Hierarchical clustering and heatmap visualization reveal notable differences in clustering patterns among biological replicates. In particular, the U2AF2 control samples (U2AF2_SF1_control rep1 vs. rep2) show an unexpected distance between replicates, suggesting a potential batch effect. This is a common technical artifact probably arising from differences in experimental conditions such as library preparation, sequencing run, or reagent lot. This separation could artificially influence downstream differential expression results.
+In contrast, shRNA_U2AF1 appears to cluster relatively closer to its control, indicating less variability, though some overlap remains.
+
+## Principle component analysis 
+Principal Component Analysis (PCA) helps assess global gene expression patterns across samples. PCA plot is useful for visualizing relationships between samples based on their gene expression profiles which then can be evaluated whether the effect of experimental covariates or detection of batch effects.
+
+What is a batch effect? The batch effect is usually caused by an unbalanced experimental design, which has the same procedure but different facilities/ reagents, equipment, etc. (non-biological reasons).
+Samples with replicates that are similar in their gene expression will cluster close together; meanwhile, the more different the expression, the more separated the samples. PC1 (first principal component) is mostly aligned with the experimental covariate of interest or captures the most largest variance in data (between control and KD samples). Followed by PC2, the second component, is aligned with the sequencing protocol (between replicates) that captures technical variation helping identify batch effects.
+
+### Global PCA across all Experimental conditions
+```{r}
+# Create PCA data from plotPCA but with returnData = T
+PCAdata= plotPCA(rld, intgroup = c("condition", "replicate"), 
+                 ntop = 10000,
+                 returnData = T)
+
+# Round PCA data to make percent Variance
+percentVariance = round(attr(PCAdata, "percentVar")*100, digits = 2)
+
+# Create PCA plot
+ggplot(PCAdata, aes(PC1, PC2, color = condition, shape = replicate)) + 
+  geom_point(size = 4) + 
+  labs(x= paste0("PC1: ", percentVariance[1], "%"),
+       y= paste0("PC2: ", percentVariance[2], "%")) +
+  theme_linedraw() + 
+  ggtitle("Different gene expression across different conditions and replicates") + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_segment(aes(x =-20, y = -24, xend = 29, yend = -20),
+    arrow = arrow(length = unit(0.3, "cm"), type = "closed"),
+    color = "red") + 
+  geom_segment(aes(x =-28, y = 38, xend = 43, yend = 18),
+    arrow = arrow(length = unit(0.3, "cm"), type = "closed"),
+    color = "red") 
+```
+Both U2AF1 and U2AF2 KD samples are separated away from their respective control, indicating the depletion of these genes that might cause differential gene expression. In contrast, SF1 depletion condition clusters near by its control which could suggest that SF1 KD are most likely giving minimal disruption on expression.
+Moreover, batch effect is detected on U2AF2_SF1 control between their 2 replicates (in specific). Therefore, further quality control or assessment should be taken to later decide whether this control sample will be keep for downstream DESeq2 analysis or not.
+
+```{r}
+# Get only SF1 KD and its control
+dds_subset <- dds[, dds$condition %in% c("SF1", "Ctrl_U2AF2_SF1")]
+
+rld_subset <- rlog(dds_subset, blind = FALSE)
+
+# Create PCA data from plotPCA but with returnData = T
+PCAdata_SF1 <- plotPCA(rld_subset, intgroup = c("condition", "replicate"), 
+                   ntop = 10000,
+                   returnData = TRUE)
+
+# Round PCA data to make percent Variance
+percentVariance = round(attr(PCAdata_SF1, "percentVar")*100, digits = 2)
+
+# Create PCA plot
+ggplot(PCAdata_SF1, aes(PC1, PC2, color = condition, shape = replicate)) + 
+  geom_point(size = 4) + 
+  labs(x= paste0("PC1: ", percentVariance[1], "%"),
+       y= paste0("PC2: ", percentVariance[2], "%")) +
+  theme_linedraw() + 
+  ggtitle("Different gene expression between SF1 depletion dataset and its control") + 
+  geom_hline(yintercept = 0, linetype = "dashed") + 
+  geom_vline(xintercept = 0, linetype = "dashed")
+```
+
+
+# Count plots comparing each pair of control and depletion condition
+A count plot displays the frequency or how many counts of observations in each categorical variables which is usually used to compare or identify the trends/ patterns/ differences between categories. For eg, in this analysis, count plots are utilized to determine number of read counts across each pair of gene KD sample and its control (without depletion) which then represents if the gene expression (number of read counts) is about to go up or down upon specific gene KD. 
+```{r}
+# choose only GOI from gene_anno df
+my.genes = dplyr::mutate(gene_anno, myLabel = case_when(
+  SYMBOL == "U2AF1" ~ "U2AF1", 
+  SYMBOL == "U2AF2" ~ "U2AF2", 
+  SYMBOL == "SF1" ~ "SF1", 
+  TRUE ~ NA
+))
+# remove all NA value and filter only GOI 
+myGenes = my.genes[!is.na(my.genes$myLabel),]
+  
+# Create a function for 
+normalized_counts = function(dds, pair){
+  #Get all normalized counts using sizeFactors
+  normalized_reads <- DESeq2::counts(dds, normalized=TRUE)
+  
+  #choose each pair of condition for comparison
+  pair_count = colnames(normalized_reads)[colData(dds)$condition %in% pair]
+  #pair of condition = column in df
+  sub_count = normalized_reads[, pair_count]
+  
+  #Convert counts result into data frame and add GeneID column
+  normalized_reads.df = as.data.frame(sub_count)
+  
+  #add geneID column into df
+  normalized_reads.df$GeneID = geneIDs
+  
+  #Convert normal df into ggplot2 compatible df
+  normalized_reads.df2 <- normalized_reads.df %>%
+    tidyr::pivot_longer(
+      cols = -GeneID,
+      names_to = "sample",
+      values_to = "norm.count")
+  
+  #add condition column that matches between data
+  normalized_reads.df2$condition = colData(dds)$condition[match(normalized_reads.df2$sample, colnames(dds))]
+  #add replicate column also to make sure they are matched
+  normalized_reads.df2$replicate = colData(dds)$replicate[match(normalized_reads.df2$sample, colnames(dds))]
+  
+  # merge df with GOI df using GeneID = ENSEMBL
+  normalized_reads.df2 = left_join(normalized_reads.df2, my.genes, by = c("GeneID" = "ENSEMBL"))
+  # from df above, choose only GOI to count
+  normal.counts = normalized_reads.df2 %>% 
+    filter(normalized_reads.df2$myLabel %in% myGenes$myLabel)
+  
+return(list(normalized_reads.df2 = normalized_reads.df2, normal.counts = normal.counts))
+}
+```
+
+
+```{r}
+# apply function to get normalized read count of each pair of condition (shRNA vs control)
+# then create a count plot based on reads count of only GOI
+U2AF1_counts = normalized_counts(dds, pair = c("U2AF1", "Ctrl_U2AF1"))
+
+c1 = ggplot(U2AF1_counts$normal.counts, aes(x=condition, y=norm.count, col = myLabel)) +
+  geom_point(size = 6, alpha = 0.7) +
+  scale_y_log10() +
+  facet_wrap(~ SYMBOL) +
+  theme_light(base_size = 10) + 
+  ggtitle("U2AF1 dataset") + 
+  labs(x = NULL, y = NULL, color = "Genes of Interest") + 
+  scale_color_manual(values = c("U2AF1" = "#F5B355", "U2AF2" = "#C43142", "SF1" = "#4D6291"))
+
+U2AF2_counts = normalized_counts(dds, pair = c("U2AF2", "Ctrl_U2AF2_SF1"))
+
+c2 = ggplot(U2AF2_counts$normal.counts, aes(x=condition, y=norm.count, color = myLabel)) +
+  geom_point(size = 6, alpha = 0.7) +
+  scale_y_log10() +
+  facet_wrap(~ SYMBOL) +
+  theme_light(base_size = 10) + 
+  ggtitle("U2AF2 dataset") + 
+  labs(x = NULL, y = NULL, color = "Genes of Interest") +  
+  scale_color_manual(values = c("U2AF1" = "#F5B355", "U2AF2" = "#C43142", "SF1" = "#4D6291"))
+
+SF1_counts = normalized_counts(dds, pair = c("SF1", "Ctrl_U2AF2_SF1"))
+
+c3 = ggplot(SF1_counts$normal.counts, aes(x=condition, y=norm.count, color = myLabel)) +
+  geom_point(size = 6, alpha = 0.7) +
+  scale_y_log10() +
+  facet_wrap(~ SYMBOL) +
+  theme_light(base_size = 10) + 
+  ggtitle("SF1 dataset") + 
+  labs(x = NULL, y = NULL, color = "Genes of Interest") + 
+  scale_color_manual(values = c("U2AF1" = "#F5B355", "U2AF2" = "#C43142", "SF1" = "#4D6291")) 
+
+U2AF2_COUNTs = normalized_counts(dds, pair = c("U2AF2", "Ctrl_U2AF1"))
+
+c4 = ggplot(U2AF2_COUNTs$normal.counts, aes(x=condition, y=norm.count, color = myLabel)) +
+  geom_point(size = 6, alpha = 0.7) +
+  scale_y_log10() +
+  facet_wrap(~ SYMBOL) +
+  theme_light(base_size = 10) + 
+  ggtitle("U2AF2 dataset") + 
+  labs(x = NULL, y = NULL, color = "Genes of Interest") + 
+  scale_color_manual(values = c("U2AF1" = "#F5B355", "U2AF2" = "#C43142", "SF1" = "#4D6291"))
+```
+
+In the comparison between U2AF2 shRNA and U2AF2, SF1 control with batch effects between 2 replicates (founded in PCA plot), it's unreliable to tell whether U2AF2 shRNA KD is actually downregulate/ being knocked down or not for comparison. That's why it came to the solution which U2AF1 control is used to compare. 
+U2AF1 control is used as alternative reference. Technically, U2AF1 control has the similar shRNA KD targeting genes to U2AF2_SF1 control and processing pipeline but proceed in different time point (different day). As a result, U2AF2 KD sample shows reduced counts for U2AF2 supporting the effectiveness of shRNA knockdown. This would help interpret when U2AF2 control is unreliable.
+```{r}
+# Get all count plots into 1 frame
+c5 = ggarrange(c1, c3, c4, c2,
+          labels = c("a.", "b.", "c.", "d."),
+          nrow= 3,
+          ncol = 2, 
+          heights = c(1,1,0.05), # give some space for column labeling
+          legend = "top",
+          common.legend = TRUE)
+
+# Give general annotate for whole frame
+annotate_figure(c5, 
+                top = text_grob("Normalize counts of GOI in", color = "black", face = "bold", size = 18),
+                arrangeGrob(text_grob("with U2AF1 control", face = "bold", size = 12), # label for each column
+                            text_grob("with U2AF2 control", face = "bold", size = 12),
+                            ncol = 2,
+                            heights = c(0.05, 1)))
+```
+
+So the question is that should U2AF1 control be used or U2AF2 control be kept for further analysis? 
+
+\newpage
+
+# Splicing annotation - Core spliceosome components 
+Input annotation file collected from paper: https://www.science.org/doi/10.1126/science.adn8105 (Malgorzata E. Rogalska et al. ,Transcriptome-wide splicing network reveals specialized regulatory functions of the core spliceosome.Science386,551-560(2024).DOI:10.1126/science.adn8105) which contain gene names and geneID of core spliceosome components (from both major and minor spliceosomes) and associated factors, RNA binding proteins with known regulatory functions in AS, , and RNA-modifying enzymes and chromatin-related factors linked to splicing regulation.
+```{r}
+library(readxl)
+anno_xlsx = "../HepG2_DESeq_analysis/AS genes.xlsx"
+as_anno = read_excel(anno_xlsx) %>%
+  dplyr::select(c("Gene.Symbol", "Ensemble.Gene.ID")) %>%
+  dplyr::rename(
+    splice_SYMBOL = Gene.Symbol,
+    splice_ENSEMBL = Ensemble.Gene.ID
+  )
+
+res_list1 = list(U2AF1 = res_U2AF1.df, U2AF2_ctrlU2AF2 = res_U2AF2.df, SF1_ctrlU2AF2 = res_SF1.df, U2AF2_ctrlU2AF1 = res_U2AF2_ctrlAF1.df, SF1_ctrlU2AF1 = res_SF1_ctrlAF1.df)
+```
+
+## LFC scatter plot comparing between 2 datasets with different controls
+To answer the above question, scatter plot of LFC between 2 set of data (shRNA U2AF2 and U2AF2 control vs. shRNA U2AF2 and U2AF1 control) are executed to evaluate the control samples and validate relation between datasets. Similar to shRNA SF1 and its controls.
+
+Each plot compares DE results between KD samples and 2 controls (U2AF2 KD vs. U2AF2_SF1 control or vs. U2AF1 control)
+
+As the result, if the R values of regression lines (line of best fit) between 2 variables (datasets) are high, the relationship of variables should be strong showing how one variablle tends to change as the other changes. Otherwise, weak relationship is described by the low R value. The reason causing low correlation and regression is due to outliers (genes regulate in different directions (up or down) between 2 variables. The more outliers, the lower the R values)
+```{r}
+# Create a function
+log2FC_compare = function(d1, d2, var1, var2) { 
+
+  # Merge 2 datasets in to 1 df
+  d1_d2_df = left_join(d1, d2, by = "GeneID", suffix = c(var1, var2))
+  
+  #add SYMBOL/ gene name column
+  d1_d2_df$SYMBOL = as_anno$splice_SYMBOL[match(d1_d2_df$GeneID, as_anno$splice_ENSEMBL)]
+  
+  # Add regulated column if a gene regulated either in only 1 dataset or both
+  d1_d2_df = d1_d2_df %>% mutate(
+    regulate_direction = case_when(
+      .[[paste0("regulated", var1)]] & .[[paste0("regulated", var2)]] == TRUE ~ "both",
+      .[[paste0("regulated", var1)]] & !.[[paste0("regulated", var2)]] == TRUE ~ paste("only",var1),
+      !.[[paste0("regulated", var1)]] & .[[paste0("regulated", var2)]] == TRUE ~ paste("only",var2),
+      TRUE ~ NA), # If genes are nonregulated, assign it as NA
+    GOI = case_when(
+      grepl("U2AF2", SYMBOL) ~ SYMBOL,
+      grepl("U2AF1", SYMBOL) ~ SYMBOL,
+      grepl("SF1", SYMBOL) ~ SYMBOL,
+      grepl("SRSF3", SYMBOL) ~ SYMBOL,
+      grepl("SRSF1", SYMBOL) ~ SYMBOL,
+      grepl("SRSF7", SYMBOL) ~ SYMBOL,
+      grepl("SRRM2", SYMBOL) ~ SYMBOL,
+      grepl("SON1", SYMBOL) ~ SYMBOL,
+      grepl("RNPS1", SYMBOL) ~ SYMBOL,
+      TRUE ~ NA)) # Assign all GOI related to splicing using grepl()
+  
+  # Arrange regulate = FALSE first so they will be plotted first => points will be backwards and remove NA 
+  d1_d2_df = d1_d2_df %>%
+  arrange(!is.na(regulate_direction))
+
+return(d1_d2_df)
+}
+```
+At the end, there should be 4 lines with correlation values among 4 different groups (genes regulate in both dataset, or only 1 of them, or none of them - nonregulated). 
+
+::: panel-tabset
+
+### U2AF2 vs. U2AF2 and U2AF1 controls
+```{r}
+# apply function on 2 datasets
+U2AF2_U2AF2_ctrlU2AF1_df = log2FC_compare(res_list1$U2AF2_ctrlU2AF2, res_list1$U2AF2_ctrlU2AF1, ".U2AF2_ctrlU2AF2", ".U2AF2_ctrlU2AF1")
+
+# LFC scatter plot
+ggplot(
+  U2AF2_U2AF2_ctrlU2AF1_df,
+  aes(x = log2FoldChange.U2AF2_ctrlU2AF2, 
+      y = log2FoldChange.U2AF2_ctrlU2AF1, 
+      label = GOI, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(U2AF2_U2AF2_ctrlU2AF1_df, !is.na(GOI)),
+             color = "black", stroke = 1, size = 2.5, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both" = "#FFCD22FF", 
+               "only .U2AF2_ctrlU2AF2" = "#0E54B6FF", 
+               "only .U2AF2_ctrlU2AF1" = "#BD241EFF"), 
+               na.value = "#D7DCE4FF") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(aes(label = GOI, color = regulate_direction),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 80,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.7,
+    fontface = "bold") +
+  geom_abline(linetype = "dashed") +
+  stat_cor(method = "pearson") + # group all data in a single group
+  labs(
+    x = "log2FC (shRNA U2AF2_ctrl U2AF2)",
+    y = "log2FC (shRNA U2AF2_ctrl U2AF1)",
+    title = "LFC Scatter plot of all genes of U2AF2 KD with ctrl of U2AF2 and U2AF1") +
+  theme_bw() 
+
+```
+In ggplot2 package, group() aesthetic is usually used to group all data for regression values among multiple groups. Even though batch effects in U2AF2 control and grouped data showing roughly low Pearson correlation (R = 0.63) between shRNA U2AF2 and 2 different controls, upon regulated genes, correlation is high (R = 0.93) suggest the similar in differential gene expression patterns. 
+
+### SF1 vs. U2AF2 and U2AF1 controls
+```{r}
+SF1_SF1_ctrlU2AF1_df = log2FC_compare(res_list1$SF1_ctrlU2AF2, res_list1$SF1_ctrlU2AF1, ".SF1_ctrlU2AF2", ".SF1_ctrlU2AF1")
+
+s4 = ggplot(
+  SF1_SF1_ctrlU2AF1_df,
+  aes(x = log2FoldChange.SF1_ctrlU2AF2, 
+      y = log2FoldChange.SF1_ctrlU2AF1, 
+      label = GOI, 
+      color = regulate_direction)) +
+  # All genes
+  geom_point(aes(color = regulate_direction), size = 2, alpha = 0.7) +
+  # GOI genes in black and larger
+  geom_point(data = subset(SF1_SF1_ctrlU2AF1_df, !is.na(GOI)),
+             color = "black", stroke = 1, size = 3, shape = 21, fill = "red") +
+  scale_color_manual(
+    values = c("both" = "#FFCD22FF", 
+               "only .SF1_ctrlU2AF2" = "#0E54B6FF", 
+               "only .SF1_ctrlU2AF1" = "#BD241EFF"), 
+               na.value = "#D7DCE4FF") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_smooth(method = "lm", se = FALSE, color = "red", linewidth = 1.5, alpha = 0.8) +
+  geom_label_repel(aes(label = GOI, 
+                       color = regulate_direction, 
+                       fontface = "bold"),
+    box.padding = 0.5,
+    point.padding = 0.5,
+    size = 4,
+    label.size = 0.3,
+    max.overlaps = 80,   # how all labels regardless of overlap
+    force = 1.5,           # repel force; increase if still overlapping
+    force_pull = 0.7,
+    show.legend = FALSE) +
+  geom_abline(linetype = "dashed") +
+  stat_cor( method = "pearson") +
+  labs(
+    x = "log2FC (shRNA SF1_ctrl U2AF2)",
+    y = "log2FC (shRNA SF1_ctrl U2AF1)",
+    title = "LFC Scatter plot of all genes of SF1 KD with ctrl of U2AF2 and U2AF1") +
+  theme_bw()
+s4
+```
+SF1 gene KD is downregulated in both datasets. Similar to U2AF2 results, regulated genes between 2 datasets has pretty high correlation. 
+
+Therefore, we could tell that overall regulated gene expression pattern is high correlation/ consistent.
+:::
+
+Create a list of all dds result
+```{r}
+# Extract only regulated genes from each dataset and merge them but column for violin plot
+regulate_df1 = purrr::map(res_list1, function(x) {
+  filter(x, regulated == TRUE) %>%
+    dplyr::select(c("log2FoldChange", "GeneID", "up_down", "padj"))
+}) %>%
+  purrr::keep(~ inherits(.x, "data.frame"))
+
+# first merge all df by row then create short function 
+reg_violin = do.call(rbind, Map(function(df, name_df) {
+  # add data_condition of each df = name_df
+  df$data_condition = name_df
+  return(df)}, 
+  regulate_df1, names(regulate_df1))) 
+
+upreg_violin = reg_violin %>%
+  filter(up_down == "up")
+
+downreg_violin = reg_violin %>%
+  filter(up_down == "down")
+```
+
+# Rainplot compare 5 different datasets
+
+::: panel-tabset
+
+## Rainplot
+```{r}
+# Define pairwise comparisons
+pair_comparisons = list(c("U2AF2_ctrlU2AF2", "U2AF2_ctrlU2AF1"),
+                        c("SF1_ctrlU2AF2","SF1_ctrlU2AF1"))
+
+ggplot(reg_violin,
+       aes(x = data_condition, y = log2FoldChange, fill = data_condition, color = data_condition)) + 
+  geom_rain(likert = TRUE, seed = 123, alpha = 0.7,
+            point.args = rlang::list2(size = 0.2), color = "black",
+            point.args.pos = rlang::list2(position = position_jitter(width = 0.045)),
+            boxplot.args = rlang::list2(color = "black", outlier.shape = NA),
+            boxplot.args.pos = rlang::list2(width = 0.15, alpha = 0.5, position = position_nudge(x = -0.2))) + 
+  scale_fill_manual(values = c("cornflowerblue", "#8867A1", "#F5B355", "#E56946", "#C43142")) + 
+  scale_color_manual(values = c("cornflowerblue", "#8867A1", "#F5B355", "#E56946", "#C43142")) + 
+  labs(title = "Comparison of LFC of regulated genes upon KD with different controls", 
+       x = "KD vs Control sample", y = "log2 Fold Change of all regulated genes") + 
+  stat_compare_means(comparisons = pair_comparisons,
+                     method = "wilcox.test", 
+                     aes(label = paste0("p=", after_stat(p.format))),
+                     show.legend = FALSE) + 
+  theme_light() + 
+  theme(legend.position = "none", 
+        axis.text.y = element_text(face = "bold", size = 12),
+        axis.text.x = element_text(face = "bold", size = 11)) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 0.7) + 
+  coord_flip()
+```
+
+The Wilcoxon rank-sum test is a non-parametric alternative to the t-test. It compares 2 paired group or 2 independent groups to see if their median differ significantly and whether one group tends to have higher or lower values than another, without assuming the data is normally distributed. Wilcoxon test ranks all values from smallest to largest then sum all the rank for each group. The test statistic value of Wilcoxon test later on is converted into probability values. In this analysis, The Wilcoxon test compares the distributions of L2FC values between those groups. As the result,the distribution of log2 fold changes (L2FC) between these two comparisons gave a p-value = 2.7e-12 which is very small. This could be mean that a small shift can be statistically significant (especially in big dataset). Therefore, changing the control from U2AF2 control to U2AF1 control leads to significantly different average fold-change patterns in the same KD (U2AF2). Even if the knockdown gene is the same, different controls might yield different baselines. 
+
+However, the distribution of those comparisons looks similarly. The question is that If the choice of control sample between control U2AF2 and control U2AF1 would affect the statistics of expression changes across genes?
+
+## Non-parametric test 
+```{r}
+### SF1
+bs1 = ggbetweenstats(
+  data = reg_violin %>% filter(data_condition %in% c("SF1_ctrlU2AF2", "SF1_ctrlU2AF1")),
+  x = data_condition,
+  y = log2FoldChange,
+  xlab = "",
+  type = "nonparametric",           # Use Wilcoxon test
+  pairwise.comparisons = TRUE,
+  pairwise.display = "significant", # show all pairwise comparisons
+  p.adjust.method = "BH",
+  results.subtitle = TRUE,
+  plot.type = "box",
+  centrality.point.args = list(size = 4, shape = 21, fill = "yellow", stroke = 1, alpha =1),
+  violinplot.args = list(width = 0.44, alpha = 0.1),
+  point.args = list(alpha = 0), # remove points
+  boxplot.args = list(width = 0.2, alpha = 0.8, fill = c("cornflowerblue","#8867A1")),
+  ggtheme = ggplot2::theme_light()) +
+  ggplot2::geom_hline(yintercept = 0, color = "darkred", linetype = "dashed") + 
+  #ggplot2::scale_color_manual(values = c("#4D6291","#8867A1")) + 
+  theme(
+    plot.title = element_text(color = "black", face = "bold", size = 13))
+
+### U2AF2
+bs2 = ggstatsplot::ggbetweenstats(
+  data = reg_violin %>% 
+    dplyr::filter(data_condition %in% c("U2AF2_ctrlU2AF2", "U2AF2_ctrlU2AF1")),
+  x = data_condition,
+  y = log2FoldChange,
+  xlab = "", 
+  type = "nonparametric",           # Use Wilcoxon test
+  pairwise.comparisons = TRUE,
+  pairwise.display = "all", # show all pairwise comparisons
+  p.adjust.method = "BH",
+  results.subtitle = TRUE,
+  plot.type = "box",
+  centrality.point.args = list(size = 3, shape = 21, fill = "yellow1", stroke = 1, alpha =1),
+  violinplot.args = list(width = 0.44, alpha = 0.1),
+  point.args = list(alpha = 0), # remove points
+  boxplot.args = list(width = 0.2, alpha = 0.8, fill = c("#E56946", "#C43142")),
+  ggtheme = ggplot2::theme_light()) +
+  ggplot2::theme(
+    plot.title = element_text(color = "black", face = "bold", size = 13)) +
+  ggplot2::geom_hline(yintercept = 0, color = "darkred", linetype = "dashed") 
+
+
+## combining the individual plots into a single plot
+combine_plots(
+  list(bs1, bs2),
+  plotgrid.args = list(ncol =2L),
+  annotation.args = list(
+    title = "Non-parametric test between KD vs. 2 different controls",
+    subtitle = "Wilcoxon test and rank biserial values"
+  )
+)
+
+
+```
+:::
+
+
+
+```{r}
+sessionInfo()
+```
+
